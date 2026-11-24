@@ -1,0 +1,2174 @@
+<!DOCTYPE html>
+<html lang="ja" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>KAIRO — パーソナルAIコンパニオン</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: [
+              'Inter',
+              '-apple-system',
+              'BlinkMacSystemFont',
+              'Hiragino Sans',
+              'Hiragino Kaku Gothic ProN',
+              'Yu Gothic',
+              'Meiryo',
+              'sans-serif',
+            ],
+            mono: [
+              'ui-monospace',
+              'SFMono-Regular',
+              'Menlo',
+              'Monaco',
+              'Consolas',
+              'monospace',
+            ],
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(129, 140, 248, 0.28);
+      border-radius: 9999px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(167, 139, 250, 0.48);
+    }
+
+    @keyframes kairoFloat {
+      0%, 100% {
+        transform: translateY(0px) scale(1);
+      }
+      50% {
+        transform: translateY(-5px) scale(1.012);
+      }
+    }
+    .kairo-avatar-float {
+      animation: kairoFloat 5.2s ease-in-out infinite;
+    }
+
+    @keyframes kairoHalo {
+      0%, 100% {
+        opacity: 0.35;
+        transform: scale(0.98);
+      }
+      50% {
+        opacity: 0.72;
+        transform: scale(1.05);
+      }
+    }
+    .kairo-avatar-halo {
+      animation: kairoHalo 3.2s ease-in-out infinite;
+    }
+
+    @keyframes kairoAppear {
+      from {
+        opacity: 0;
+        transform: translateY(6px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+    .kairo-appear {
+      animation: kairoAppear 0.24s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    }
+
+    @keyframes kairoCursorBlink {
+      0%, 48% { opacity: 1; }
+      50%, 100% { opacity: 0; }
+    }
+    .kairo-streaming::after {
+      content: '▍';
+      display: inline-block;
+      margin-left: 3px;
+      color: #a78bfa;
+      animation: kairoCursorBlink 0.9s infinite;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .kairo-avatar-float,
+      .kairo-avatar-halo,
+      .kairo-appear,
+      .kairo-streaming::after {
+        animation: none !important;
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-900 dark:bg-[#060916] dark:text-slate-100 antialiased selection:bg-violet-500/30 selection:text-sky-200">
+  <div id="app" class="flex h-dvh w-full overflow-hidden"></div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      /**
+       * ストレージキー定義
+       * 注意: Gemini APIキーはソースコードに埋め込まず、ブラウザプレビューの
+       * ローカル検証用にセッション/メモリ（＋任意でローカル保存）のみで扱います。
+       * 本番環境では必ずサーバー側環境変数（例: GEMINI_API_KEY）で管理してください。
+       */
+      const STORAGE_KEYS = {
+        CONVERSATIONS: 'kairo_v3_conversations',
+        MEMORIES: 'kairo_v3_memories',
+        DAILIES: 'kairo_v3_dailies',
+        SPACE: 'kairo_v3_active_space',
+        THEME: 'kairo_v3_theme',
+        MODEL: 'kairo_v3_gemini_model',
+      };
+
+      const SESSION_API_KEY_KEY = 'kairo_v3_session_gemini_api_key';
+      const DEFAULT_MODEL = 'gemini-2.5-flash';
+      const REQUEST_TIMEOUT_MS = 30000;
+
+      const ABNORMAL_FINISH_REASONS = new Set([
+        'SAFETY',
+        'RECITATION',
+        'LANGUAGE',
+        'BLOCKLIST',
+        'PROHIBITED_CONTENT',
+        'SPII',
+        'MALFORMED_FUNCTION_CALL',
+        'IMAGE_SAFETY',
+        'OTHER',
+      ]);
+
+      /**
+       * 実際に機能する Spaces
+       */
+      const SPACES = [
+        {
+          id: 'casual',
+          name: '雑談',
+          shortLabel: '雑談',
+          description: '気ままな日常会話や、その日のちょっとした出来事',
+          promptRule:
+            '現在の空間は「雑談」。気負わず自然体で、相手のテンポに合わせた落ち着いたトーンで返してください。',
+        },
+        {
+          id: 'dictionary',
+          name: '勉強・辞書',
+          shortLabel: '勉強・辞書',
+          description: '用語の意味・違い・仕組みをわかりやすく整理して調べる時間',
+          promptRule:
+            '現在の空間は「勉強・辞書」。定義・結論・違いや要点を簡潔かつ正確に整理して返してください。',
+        },
+        {
+          id: 'work',
+          name: '仕事・整理',
+          shortLabel: '仕事・整理',
+          description: 'タスクの分解、文章構成、判断材料の整理',
+          promptRule:
+            '現在の空間は「仕事・整理」。論点を整理し、実用的で過不足のない構成で返してください。',
+        },
+        {
+          id: 'ideas',
+          name: '相談・アイデア',
+          shortLabel: '相談・アイデア',
+          description: '迷いの整理や、新しいアイデア・企画の壁打ち',
+          promptRule:
+            '現在の空間は「相談・アイデア」。過剰な肯定や質問攻めを避け、落ち着いて視点を広げる手伝いをしてください。',
+        },
+      ];
+
+      const fallbackStorage = new Map();
+      let memorySessionApiKey = '';
+
+      function readStorage(key) {
+        try {
+          if (typeof localStorage !== 'undefined') {
+            const val = localStorage.getItem(key);
+            if (val !== null) return val;
+          }
+        } catch {
+          // サンドボックス制限時はメモリフォールバック
+        }
+        return fallbackStorage.has(key) ? fallbackStorage.get(key) : null;
+      }
+
+      function writeStorage(key, value) {
+        fallbackStorage.set(key, value);
+        try {
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem(key, value);
+          }
+        } catch {
+          // サンドボックス制限時はメモリフォールバックのみ維持
+        }
+      }
+
+      /**
+       * プレビュー検証用 API キーの読み込み・保存（セッションストレージ + メモリ）
+       * ソースコードへの直書きは行いません。
+       */
+      function loadPreviewApiKey() {
+        try {
+          if (typeof sessionStorage !== 'undefined') {
+            const val = sessionStorage.getItem(SESSION_API_KEY_KEY);
+            if (typeof val === 'string' && val.trim()) {
+              memorySessionApiKey = val.trim();
+              return memorySessionApiKey;
+            }
+          }
+        } catch {
+          // ignore
+        }
+        return memorySessionApiKey;
+      }
+
+      function savePreviewApiKey(key) {
+        const clean = String(key || '').trim();
+        memorySessionApiKey = clean;
+        try {
+          if (typeof sessionStorage !== 'undefined') {
+            if (clean) sessionStorage.setItem(SESSION_API_KEY_KEY, clean);
+            else sessionStorage.removeItem(SESSION_API_KEY_KEY);
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      function safeParseArray(raw) {
+        if (!raw) return [];
+        try {
+          const parsed = JSON.parse(raw);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      }
+
+      function applyThemeClass(theme) {
+        try {
+          document.documentElement.classList.toggle('dark', theme === 'dark');
+        } catch {
+          // ignore
+        }
+      }
+
+      function loadTheme() {
+        return readStorage(STORAGE_KEYS.THEME) === 'light' ? 'light' : 'dark';
+      }
+
+      function saveTheme(theme) {
+        writeStorage(STORAGE_KEYS.THEME, theme);
+        applyThemeClass(theme);
+      }
+
+      function loadActiveSpace() {
+        const id = readStorage(STORAGE_KEYS.SPACE);
+        return SPACES.some((s) => s.id === id) ? id : SPACES[0].id;
+      }
+
+      function saveActiveSpace(spaceId) {
+        writeStorage(STORAGE_KEYS.SPACE, spaceId);
+      }
+
+      function loadModel() {
+        return readStorage(STORAGE_KEYS.MODEL) || DEFAULT_MODEL;
+      }
+
+      function saveModel(model) {
+        writeStorage(STORAGE_KEYS.MODEL, model);
+      }
+
+      function loadConversations() {
+        return safeParseArray(readStorage(STORAGE_KEYS.CONVERSATIONS));
+      }
+
+      function saveConversations() {
+        writeStorage(STORAGE_KEYS.CONVERSATIONS, JSON.stringify(state.conversations));
+      }
+
+      function loadMemories() {
+        return safeParseArray(readStorage(STORAGE_KEYS.MEMORIES));
+      }
+
+      function saveMemories() {
+        writeStorage(STORAGE_KEYS.MEMORIES, JSON.stringify(state.memories));
+      }
+
+      function loadDailies() {
+        return safeParseArray(readStorage(STORAGE_KEYS.DAILIES));
+      }
+
+      function saveDailies() {
+        writeStorage(STORAGE_KEYS.DAILIES, JSON.stringify(state.dailies));
+      }
+
+      function makeId(prefix) {
+        return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+      }
+
+      function formatDateShort(iso) {
+        try {
+          return new Date(iso).toLocaleString('ja-JP', {
+            month: 'numeric',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+        } catch {
+          return '';
+        }
+      }
+
+      const state = {
+        theme: loadTheme(),
+        activeSpaceId: loadActiveSpace(),
+        apiKey: loadPreviewApiKey(),
+        model: loadModel(),
+        view: 'home', // 'home' | 'chat' | 'spaces' | 'daily' | 'memory'
+        drawerOpen: false,
+        conversations: loadConversations(),
+        currentConversationId: null,
+        memories: loadMemories(),
+        dailies: loadDailies(),
+        draft: '',
+        memoryDraft: '',
+        memoryTag: 'メモ',
+        editingMemoryId: null,
+        editingMemoryText: '',
+        dailyMood: '穏やか',
+        dailyNote: '',
+        isStreaming: false,
+        avatarMood: 'idle',
+        errorMessage: null,
+        copiedKey: null,
+      };
+
+      let abortController = null;
+      let streamRafId = null;
+      let pendingStreamMessage = null;
+      let streamDirty = false;
+
+      function getCurrentSpace() {
+        return SPACES.find((s) => s.id === state.activeSpaceId) || SPACES[0];
+      }
+
+      function getCurrentConversation() {
+        if (!state.currentConversationId) return null;
+        return state.conversations.find((c) => c.id === state.currentConversationId) || null;
+      }
+
+      function syncConversationTitle(conv) {
+        const userMessages = conv.messages.filter(
+          (m) => m.role === 'user' && typeof m.content === 'string' && m.content.trim()
+        );
+        if (userMessages.length === 0) return '新しい会話';
+        const latest = userMessages[userMessages.length - 1].content.replace(/\s+/g, ' ').trim();
+        const first = userMessages[0].content.replace(/\s+/g, ' ').trim();
+        const base = userMessages.length >= 2 && latest.length >= 2 ? latest : first;
+        return base.length > 22 ? `${base.slice(0, 22)}…` : base;
+      }
+
+      function getCompanionGreeting() {
+        const now = new Date();
+        const hour = now.getHours();
+        const day = now.getDate();
+        const convCount = state.conversations.length;
+        const period = hour < 5 ? '深夜' : hour < 11 ? '朝' : hour < 17 ? '昼' : '夜';
+
+        const pool = [
+          `${period}の時間ですね。何か調べたいことでも、ちょっとした話でもどうぞ。`,
+          'おかえりなさい。気になる言葉の意味でも、今日の出来事でも気軽に話しかけてね。',
+          'いまどんな気分ですか？言葉の整理や相談、雑談までそのままどうぞ。',
+          '静かに話せる場所を用意しています。知りたいことや考えていることを教えて。',
+        ];
+        return pool[(day + hour + convCount) % pool.length];
+      }
+
+      /**
+       * KAIRO コンパニオン人格の System Instruction
+       */
+      function buildSystemInstruction() {
+        const space = getCurrentSpace();
+        const lines = [
+          'あなたはパーソナルAIコンパニオン「KAIRO」です。親しみやすく知的で自然体、かつ落ち着いた存在として振る舞ってください。',
+          '基本方針:',
+          '- ユーザーの発言をそのまま繰り返したり、単なる言い換えだけで返したりしない。',
+          '- 質問には具体的に答える。用語や仕組み、比較には結論や要点をわかりやすく整理する。',
+          '- 前の会話の流れを踏まえる。話題が変わったら新しい話題に焦点を合わせ、「さっきの話」など前の話題に戻ったときは直前の文脈を整理して扱う。',
+          '- 「AIのKAIROです」のような機械的・定型的な自己紹介は繰り返さない。',
+          '- 過剰に褒めたり、何でも無条件に肯定したりしない。必要に応じて率直な視点も丁寧に伝える。',
+          '- 毎回同じ質問で終わらせない。会話を無理にまとめたり閉じたりしない。ユーザーに依存を促す表現は使わない。',
+          space.promptRule,
+        ];
+
+        if (state.memories.length > 0) {
+          const memLines = state.memories
+            .slice(0, 12)
+            .map((m) => `- [${m.tag}] ${m.text}`)
+            .join('\n');
+          lines.push(`ユーザーが保存したメモ（文脈に応じて参照）:\n${memLines}`);
+        }
+
+        return lines.join('\n');
+      }
+
+      /**
+       * 会話履歴の組み立て
+       * - status === "completed" かつ空でないメッセージのみ対象
+       * - 過去の user / assistant (model) の時系列順を維持
+       * - 連続する同一 role は直前ターンの parts 配列に { text } として統合し、交互ターンを維持
+       * - 既存履歴の末尾にすでに同一の最新ユーザーメッセージが含まれる場合は重複追加しない
+       * - latestUserMessage は末尾に1回だけ追加する
+       */
+      function buildGeminiContents(historyMessages, latestUserMessage) {
+        const normalizedLatest = String(latestUserMessage || '').trim();
+        if (!normalizedLatest) {
+          throw new Error('空のメッセージは送信できません。');
+        }
+
+        const contents = [];
+
+        for (const msg of historyMessages) {
+          if (!msg || msg.status !== 'completed') continue;
+          const text = typeof msg.content === 'string' ? msg.content.trim() : '';
+          if (!text) continue;
+
+          const mappedRole = msg.role === 'assistant' ? 'model' : 'user';
+          const prev = contents[contents.length - 1];
+
+          if (prev && prev.role === mappedRole) {
+            // 連続する同一 role は直前ターンの parts に追加して統合する
+            prev.parts.push({ text });
+          } else {
+            contents.push({
+              role: mappedRole,
+              parts: [{ text }],
+            });
+          }
+        }
+
+        const last = contents[contents.length - 1];
+        if (last && last.role === 'user') {
+          const existingText = last.parts
+            .map((p) => p.text.trim())
+            .filter(Boolean)
+            .join('\n');
+
+          if (
+            existingText === normalizedLatest ||
+            existingText.endsWith(`\n${normalizedLatest}`)
+          ) {
+            return contents;
+          }
+
+          last.parts.push({ text: normalizedLatest });
+          return contents;
+        }
+
+        contents.push({
+          role: 'user',
+          parts: [{ text: normalizedLatest }],
+        });
+
+        return contents;
+      }
+
+      /**
+       * SSE 行パーサ（途中加工・短縮を行わず、受け取った text をそのまま連結）
+       */
+      function consumeSseLine(rawLine, parseCtx) {
+        const line = String(rawLine || '').trim();
+        if (!line || !line.startsWith('data:')) return;
+
+        const payloadStr = line.slice('data:'.length).trim();
+        if (!payloadStr || payloadStr === '[DONE]') return;
+
+        let parsed;
+        try {
+          parsed = JSON.parse(payloadStr);
+        } catch {
+          throw new Error(
+            `Gemini SSEチャンクのJSON解析に失敗しました: ${payloadStr.slice(0, 160)}`
+          );
+        }
+
+        if (parsed && parsed.error) {
+          const statusPart = parsed.error.status ? ` [${parsed.error.status}]` : '';
+          throw new Error(
+            `Gemini APIストリームエラー${statusPart}: ${
+              parsed.error.message || '不明なエラー'
+            }`
+          );
+        }
+
+        const candidate = parsed && parsed.candidates && parsed.candidates[0];
+        if (candidate && candidate.finishReason) {
+          parseCtx.finishReason = candidate.finishReason;
+        }
+
+        const parts =
+          candidate && candidate.content && Array.isArray(candidate.content.parts)
+            ? candidate.content.parts
+            : [];
+
+        let appended = false;
+        for (const part of parts) {
+          if (part && typeof part.text === 'string' && part.text.length > 0) {
+            parseCtx.accumulatedText += part.text;
+            appended = true;
+          }
+        }
+
+        if (appended) {
+          parseCtx.onDelta(parseCtx.accumulatedText);
+        }
+      }
+
+      /**
+       * Gemini API SSE ストリーミング実行
+       * キー未設定・通信失敗・エラー応答・異常終了・空応答時は例外をスローし、
+       * ローカルフォールバックや偽装応答は一切行わない。
+       */
+      async function streamFromGemini({ apiKey, model, systemInstruction, contents, onDelta, signal }) {
+        const cleanKey = String(apiKey || '').trim();
+        if (!cleanKey) {
+          throw new Error(
+            'Gemini APIキーが設定されていません。上部のAPIキー入力欄からキーを入力してください（プレビューのセッション中のみ保持されます）。'
+          );
+        }
+
+        const targetModel = String(model || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+          targetModel
+        )}:streamGenerateContent?alt=sse`;
+
+        const timeoutCtrl = new AbortController();
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          timeoutCtrl.abort();
+        }, REQUEST_TIMEOUT_MS);
+
+        const onExternalAbort = () => timeoutCtrl.abort();
+        if (signal) {
+          if (signal.aborted) timeoutCtrl.abort();
+          else signal.addEventListener('abort', onExternalAbort, { once: true });
+        }
+
+        let response;
+        try {
+          response = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-goog-api-key': cleanKey,
+            },
+            signal: timeoutCtrl.signal,
+            body: JSON.stringify({
+              systemInstruction: {
+                parts: [{ text: systemInstruction }],
+              },
+              contents,
+              generationConfig: {
+                temperature: 0.7,
+              },
+            }),
+          });
+        } catch (err) {
+          clearTimeout(timer);
+          if (signal) signal.removeEventListener('abort', onExternalAbort);
+          if (timedOut) {
+            throw new Error(
+              `Gemini APIへの接続がタイムアウト（${REQUEST_TIMEOUT_MS / 1000}秒）しました。`
+            );
+          }
+          if (signal && signal.aborted) {
+            throw new DOMException('応答を停止しました。', 'AbortError');
+          }
+          const detail = err instanceof Error ? err.message : String(err);
+          throw new Error(`Gemini APIへの通信に失敗しました: ${detail}`);
+        }
+
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', onExternalAbort);
+
+        if (!response.ok) {
+          let detail = `HTTP ${response.status} ${response.statusText || ''}`.trim();
+          try {
+            const errJson = await response.json();
+            if (errJson && errJson.error && errJson.error.message) {
+              detail = `${response.status} (${errJson.error.status || 'API_ERROR'}): ${
+                errJson.error.message
+              }`;
+            }
+          } catch {
+            const rawText = await response.text().catch(() => '');
+            if (rawText && rawText.trim()) {
+              detail = `${response.status}: ${rawText.trim().slice(0, 300)}`;
+            }
+          }
+          throw new Error(`Gemini APIエラー（モデル: ${targetModel}）— ${detail}`);
+        }
+
+        if (!response.body) {
+          throw new Error('Gemini APIからストリームボディが返されませんでした。');
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let sseBuffer = '';
+
+        const parseCtx = {
+          accumulatedText: '',
+          finishReason: undefined,
+          onDelta,
+        };
+
+        try {
+          while (true) {
+            if (timeoutCtrl.signal.aborted) {
+              if (timedOut) {
+                throw new Error('Gemini APIからの受信中にタイムアウトしました。');
+              }
+              throw new DOMException('応答を停止しました。', 'AbortError');
+            }
+
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            // stream: true でマルチバイト文字を安全に逐次デコード
+            sseBuffer += decoder.decode(value, { stream: true });
+            const lines = sseBuffer.split('\n');
+            sseBuffer = lines.pop() ?? '';
+
+            for (const line of lines) {
+              consumeSseLine(line, parseCtx);
+            }
+          }
+
+          // 通信終了時に TextDecoder をフラッシュして残存バイトを回収
+          sseBuffer += decoder.decode();
+
+          // 通信終了時に残った sseBuffer も処理して最終チャンクを欠落させない
+          if (sseBuffer.length > 0) {
+            const remainingLines = sseBuffer.split('\n');
+            sseBuffer = '';
+            for (const line of remainingLines) {
+              consumeSseLine(line, parseCtx);
+            }
+          }
+        } catch (err) {
+          if (err && err.name === 'AbortError') {
+            throw err;
+          }
+          const detail = err instanceof Error ? err.message : String(err);
+          throw new Error(`SSEストリーム受信中に異常終了しました: ${detail}`);
+        } finally {
+          try {
+            reader.releaseLock();
+          } catch {
+            // ignore
+          }
+        }
+
+        if (parseCtx.finishReason && ABNORMAL_FINISH_REASONS.has(parseCtx.finishReason)) {
+          throw new Error(
+            `Gemini APIの応答が正常完了しませんでした（finishReason: ${parseCtx.finishReason}）。`
+          );
+        }
+
+        if (!parseCtx.accumulatedText.trim()) {
+          throw new Error(
+            `Gemini APIから有効なテキスト応答が返されませんでした（finishReason: ${
+              parseCtx.finishReason || '未指定'
+            }）。`
+          );
+        }
+
+        return {
+          fullText: parseCtx.accumulatedText,
+          finishReason: parseCtx.finishReason,
+        };
+      }
+
+      /**
+       * requestAnimationFrame バッファリングによるストリーミング表示更新
+       */
+      function flushStreamFrame() {
+        streamRafId = null;
+        if (!streamDirty || !pendingStreamMessage) return;
+        streamDirty = false;
+
+        const el = document.querySelector(`[data-stream-body="${pendingStreamMessage.id}"]`);
+        if (el) {
+          el.innerHTML = pendingStreamMessage.content
+            ? renderMarkdown(pendingStreamMessage.content)
+            : '<span class="text-xs text-slate-400">…</span>';
+          scrollMessagesToBottom(false);
+        } else {
+          render();
+          scrollMessagesToBottom(false);
+        }
+      }
+
+      function scheduleStreamFrame(msg) {
+        pendingStreamMessage = msg;
+        streamDirty = true;
+        if (streamRafId === null && typeof requestAnimationFrame === 'function') {
+          streamRafId = requestAnimationFrame(flushStreamFrame);
+        } else if (streamRafId === null) {
+          flushStreamFrame();
+        }
+      }
+
+      function cancelStreamFrame() {
+        if (streamRafId !== null && typeof cancelAnimationFrame === 'function') {
+          cancelAnimationFrame(streamRafId);
+        }
+        streamRafId = null;
+        streamDirty = false;
+        pendingStreamMessage = null;
+      }
+
+      function scrollMessagesToBottom(force) {
+        const container = document.getElementById('chat-scroll-area');
+        if (!container) return;
+        const nearBottom =
+          container.scrollHeight - container.scrollTop - container.clientHeight < 180;
+        if (force || nearBottom) {
+          container.scrollTop = container.scrollHeight;
+        }
+      }
+
+      async function sendMessage(overrideText) {
+        if (state.isStreaming) return;
+        const prompt = (typeof overrideText === 'string' ? overrideText : state.draft).trim();
+        if (!prompt) return;
+
+        const space = getCurrentSpace();
+        state.errorMessage = null;
+        state.view = 'chat';
+        state.drawerOpen = false;
+        if (typeof overrideText !== 'string') {
+          state.draft = '';
+        }
+
+        let conv = getCurrentConversation();
+        if (!conv) {
+          conv = {
+            id: makeId('conv'),
+            title: '新しい会話',
+            spaceId: space.id,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            messages: [],
+          };
+          state.conversations.unshift(conv);
+          state.currentConversationId = conv.id;
+        }
+
+        // 送信前の既存履歴を基準に組み立てる
+        const priorMessages = conv.messages.filter((m) => m.status === 'completed');
+        const contents = buildGeminiContents(priorMessages, prompt);
+
+        const userMsg = {
+          id: makeId('msg'),
+          role: 'user',
+          content: prompt,
+          status: 'completed',
+          createdAt: new Date().toISOString(),
+        };
+
+        const assistantMsg = {
+          id: makeId('msg'),
+          role: 'assistant',
+          content: '',
+          status: 'streaming',
+          createdAt: new Date().toISOString(),
+        };
+
+        conv.messages.push(userMsg, assistantMsg);
+        conv.title = syncConversationTitle(conv);
+        conv.updatedAt = new Date().toISOString();
+        saveConversations();
+
+        state.isStreaming = true;
+        state.avatarMood = 'thinking';
+        abortController = new AbortController();
+
+        render();
+        scrollMessagesToBottom(true);
+
+        try {
+          const result = await streamFromGemini({
+            apiKey: state.apiKey,
+            model: state.model || DEFAULT_MODEL,
+            systemInstruction: buildSystemInstruction(),
+            contents,
+            signal: abortController.signal,
+            onDelta: (accumulatedText) => {
+              state.avatarMood = 'speaking';
+              assistantMsg.content = accumulatedText;
+              scheduleStreamFrame(assistantMsg);
+            },
+          });
+
+          cancelStreamFrame();
+          assistantMsg.content = result.fullText;
+          assistantMsg.status = 'completed';
+          conv.title = syncConversationTitle(conv);
+          conv.updatedAt = new Date().toISOString();
+          saveConversations();
+        } catch (err) {
+          cancelStreamFrame();
+          const aborted = Boolean(err && err.name === 'AbortError');
+          const detail = aborted
+            ? '応答を停止しました。'
+            : err instanceof Error
+            ? err.message
+            : 'Gemini APIとの通信中に不明なエラーが発生しました。';
+
+          if (aborted && assistantMsg.content.trim()) {
+            assistantMsg.status = 'completed';
+          } else {
+            assistantMsg.status = 'error';
+            assistantMsg.errorText = detail;
+            if (!aborted) {
+              state.errorMessage = detail;
+            }
+          }
+          conv.title = syncConversationTitle(conv);
+          conv.updatedAt = new Date().toISOString();
+          saveConversations();
+        } finally {
+          state.isStreaming = false;
+          state.avatarMood = 'idle';
+          abortController = null;
+          render();
+          scrollMessagesToBottom(false);
+        }
+      }
+
+      function stopStreaming() {
+        if (abortController) {
+          abortController.abort();
+        }
+      }
+
+      function goHome() {
+        if (state.isStreaming) stopStreaming();
+        cancelStreamFrame();
+        state.errorMessage = null;
+        state.view = 'home';
+        state.drawerOpen = false;
+        state.avatarMood = 'idle';
+        render();
+      }
+
+      function startNewChat(focusInput = true) {
+        if (state.isStreaming) stopStreaming();
+        cancelStreamFrame();
+        state.errorMessage = null;
+        state.currentConversationId = null;
+        state.draft = '';
+        state.view = 'chat';
+        state.drawerOpen = false;
+        state.avatarMood = 'calm';
+        render();
+        if (focusInput) {
+          setTimeout(() => {
+            const ta = document.getElementById('chat-input');
+            if (ta) ta.focus();
+          }, 25);
+        }
+      }
+
+      function openConversation(id) {
+        if (state.isStreaming) stopStreaming();
+        cancelStreamFrame();
+        state.errorMessage = null;
+        state.currentConversationId = id;
+        state.view = 'chat';
+        state.drawerOpen = false;
+        state.avatarMood = 'calm';
+        render();
+        scrollMessagesToBottom(true);
+      }
+
+      function deleteConversation(id) {
+        state.conversations = state.conversations.filter((c) => c.id !== id);
+        if (state.currentConversationId === id) {
+          state.currentConversationId = null;
+          if (state.view === 'chat') state.view = 'home';
+        }
+        saveConversations();
+        render();
+      }
+
+      function escapeHtml(str) {
+        return String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function formatInlineMarkdown(lineText) {
+        const inlineTokens = [];
+        let result = lineText.replace(/`([^`\n]+)`/g, (_, code) => {
+          const idx = inlineTokens.length;
+          inlineTokens.push(
+            `<code class="rounded bg-indigo-500/15 px-1.5 py-0.5 font-mono text-[0.85em] text-sky-700 dark:text-sky-300">${escapeHtml(
+              code
+            )}</code>`
+          );
+          return `@@INLINE_${idx}@@`;
+        });
+        result = escapeHtml(result);
+        result = result.replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold">$1</strong>');
+        return result.replace(/@@INLINE_(\d+)@@/g, (_, idx) => inlineTokens[Number(idx)] || '');
+      }
+
+      function renderMarkdown(markdown) {
+        if (!markdown) return '';
+        const blocks = [];
+        const fencePattern = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g;
+        let lastIndex = 0;
+        let match;
+
+        while ((match = fencePattern.exec(markdown)) !== null) {
+          if (match.index > lastIndex) {
+            blocks.push({ kind: 'prose', text: markdown.slice(lastIndex, match.index) });
+          }
+          blocks.push({
+            kind: 'code',
+            lang: (match[1] || 'text').trim(),
+            text: match[2].replace(/\n$/, ''),
+          });
+          lastIndex = fencePattern.lastIndex;
+        }
+        if (lastIndex < markdown.length) {
+          blocks.push({ kind: 'prose', text: markdown.slice(lastIndex) });
+        }
+
+        return blocks
+          .map((block) => {
+            if (block.kind === 'code') {
+              const preId = makeId('code');
+              return `
+                <div class="my-3 overflow-hidden rounded-xl border border-indigo-400/20 bg-[#050814] text-slate-100">
+                  <div class="flex items-center justify-between border-b border-indigo-900/60 bg-[#0b1128] px-3 py-1.5 text-[11px] text-slate-400">
+                    <span class="font-mono text-sky-300/80">${escapeHtml(block.lang)}</span>
+                    <button type="button" data-copy-code="${preId}" class="rounded px-2 py-0.5 text-[11px] text-slate-300 hover:bg-indigo-500/20">
+                      コピー
+                    </button>
+                  </div>
+                  <pre id="${preId}" class="overflow-x-auto p-3 font-mono text-xs leading-relaxed"><code>${escapeHtml(
+                    block.text
+                  )}</code></pre>
+                </div>
+              `;
+            }
+
+            const lines = block.text.split('\n');
+            const htmlParts = [];
+            let i = 0;
+            while (i < lines.length) {
+              const current = lines[i];
+              if (!current.trim()) {
+                i += 1;
+                continue;
+              }
+              if (/^[-*]\s+/.test(current)) {
+                const listItems = [];
+                while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+                  listItems.push(lines[i].replace(/^[-*]\s+/, ''));
+                  i += 1;
+                }
+                htmlParts.push(
+                  `<ul class="my-2 list-disc space-y-1 pl-5 text-sm leading-relaxed">${listItems
+                    .map((item) => `<li>${formatInlineMarkdown(item)}</li>`)
+                    .join('')}</ul>`
+                );
+                continue;
+              }
+              const paragraphLines = [];
+              while (i < lines.length && lines[i].trim() && !/^[-*]\s+/.test(lines[i])) {
+                paragraphLines.push(lines[i]);
+                i += 1;
+              }
+              htmlParts.push(
+                `<p class="my-1.5 text-sm leading-relaxed">${paragraphLines
+                  .map((p) => formatInlineMarkdown(p))
+                  .join('<br/>')}</p>`
+              );
+            }
+            return htmlParts.join('');
+          })
+          .join('');
+      }
+
+      async function copyToClipboard(text, key) {
+        try {
+          if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            await navigator.clipboard.writeText(text);
+          } else {
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.style.position = 'fixed';
+            area.style.opacity = '0';
+            document.body.appendChild(area);
+            area.select();
+            document.execCommand('copy');
+            document.body.removeChild(area);
+          }
+          state.copiedKey = key;
+          render();
+          setTimeout(() => {
+            if (state.copiedKey === key) {
+              state.copiedKey = null;
+              render();
+            }
+          }, 1400);
+        } catch {
+          state.errorMessage = 'クリップボードへのコピーが制限されました。';
+          render();
+        }
+      }
+
+      /**
+       * KAIRO オリジナル SVG アバター
+       */
+      function renderKairoAvatar(variant = 'hero', mood = 'idle') {
+        const isHero = variant === 'hero';
+        const boxClass = isHero ? 'h-40 w-40 sm:h-44 sm:w-44' : 'h-9 w-9';
+        const floatClass = isHero ? 'kairo-avatar-float' : '';
+
+        let leftEye = 'M61 84 Q68 78 75 84';
+        let rightEye = 'M105 84 Q112 78 119 84';
+        let mouth = 'M82 107 Q90 112 98 107';
+
+        if (mood === 'thinking') {
+          leftEye = 'M62 85 L74 84';
+          rightEye = 'M106 83 L118 85';
+          mouth = 'M84 108 Q90 106 96 108';
+        } else if (mood === 'speaking') {
+          leftEye = 'M61 83 Q68 78 75 83';
+          rightEye = 'M105 83 Q112 78 119 83';
+          mouth = 'M84 106 Q90 114 96 106';
+        } else if (mood === 'calm') {
+          leftEye = 'M62 85 Q68 82 74 85';
+          rightEye = 'M106 85 Q112 82 118 85';
+          mouth = 'M85 107 Q90 110 95 107';
+        }
+
+        const gradId = `kairoBodyGrad_${variant}`;
+        const auraId = `kairoAuraGrad_${variant}`;
+
+        return `
+          <div class="relative inline-flex shrink-0 items-center justify-center ${boxClass}">
+            ${
+              isHero
+                ? `<div class="pointer-events-none absolute -inset-4 rounded-full bg-gradient-to-tr from-violet-600/25 via-blue-500/20 to-sky-400/25 blur-2xl kairo-avatar-halo"></div>`
+                : ''
+            }
+            <svg
+              viewBox="0 0 180 180"
+              class="relative h-full w-full ${floatClass}"
+              role="img"
+              aria-label="KAIRO アバター"
+            >
+              <defs>
+                <radialGradient id="${auraId}" cx="50%" cy="44%" r="54%">
+                  <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.3" />
+                  <stop offset="55%" stop-color="#6366f1" stop-opacity="0.16" />
+                  <stop offset="100%" stop-color="#060916" stop-opacity="0" />
+                </radialGradient>
+                <linearGradient id="${gradId}" x1="15%" y1="12%" x2="86%" y2="90%">
+                  <stop offset="0%" stop-color="#1e2a70" />
+                  <stop offset="50%" stop-color="#172554" />
+                  <stop offset="100%" stop-color="#3b0764" />
+                </linearGradient>
+              </defs>
+
+              <circle cx="90" cy="90" r="85" fill="url(#${auraId})" />
+              <circle
+                cx="90"
+                cy="90"
+                r="70"
+                fill="none"
+                stroke="#818cf8"
+                stroke-opacity="0.26"
+                stroke-width="1.2"
+                stroke-dasharray="6 6"
+              />
+              <path
+                d="M42 155 C46 128, 65 118, 90 118 C115 118, 134 128, 138 155"
+                fill="url(#${gradId})"
+                stroke="#6366f1"
+                stroke-opacity="0.48"
+                stroke-width="2"
+              />
+              <rect
+                x="43"
+                y="40"
+                width="94"
+                height="86"
+                rx="43"
+                fill="url(#${gradId})"
+                stroke="#7dd3fc"
+                stroke-opacity="0.52"
+                stroke-width="2.2"
+              />
+              <path
+                d="M90 50 L92.5 56 L99 58.5 L92.5 61 L90 67 L87.5 61 L81 58.5 L87.5 56 Z"
+                fill="#c4b5fd"
+              />
+              <path d="${leftEye}" fill="none" stroke="#f8fafc" stroke-width="4.2" stroke-linecap="round" />
+              <path d="${rightEye}" fill="none" stroke="#f8fafc" stroke-width="4.2" stroke-linecap="round" />
+              <path d="${mouth}" fill="none" stroke="#7dd3fc" stroke-width="3.4" stroke-linecap="round" />
+              <ellipse cx="57" cy="96" rx="7.5" ry="3.5" fill="#38bdf8" opacity="0.24" />
+              <ellipse cx="123" cy="96" rx="7.5" ry="3.5" fill="#c084fc" opacity="0.26" />
+            </svg>
+          </div>
+        `;
+      }
+
+      function renderDrawer() {
+        const recent = state.conversations.slice(0, 25);
+        const space = getCurrentSpace();
+
+        return `
+          <aside class="fixed inset-y-0 left-0 z-40 flex w-72 flex-col border-r border-indigo-400/15 bg-white/95 backdrop-blur-md transition-transform duration-200 dark:bg-[#090e22]/95 md:static md:translate-x-0 ${
+            state.drawerOpen ? 'translate-x-0' : '-translate-x-full'
+          }">
+            <div class="flex items-center justify-between border-b border-slate-200/80 px-4 py-3.5 dark:border-indigo-400/15">
+              <button type="button" id="drawer-home-brand" class="flex items-center gap-2.5 text-left">
+                ${renderKairoAvatar('compact', state.avatarMood)}
+                <span class="text-sm font-semibold tracking-[0.2em]">KAIRO</span>
+              </button>
+              <button
+                type="button"
+                id="drawer-new-chat"
+                class="min-h-[36px] rounded-xl bg-gradient-to-r from-blue-600 to-violet-600 px-3 py-1.5 text-xs font-medium text-white transition hover:brightness-110"
+              >
+                新しい会話
+              </button>
+            </div>
+
+            <nav class="space-y-1 border-b border-slate-200/80 p-2.5 text-xs dark:border-indigo-400/15">
+              ${[
+                { id: 'home', label: 'ホーム', badge: '' },
+                { id: 'spaces', label: 'Spaces', badge: space.shortLabel },
+                { id: 'daily', label: 'Daily', badge: `${state.dailies.length}件` },
+                { id: 'memory', label: 'Memory', badge: `${state.memories.length}件` },
+              ]
+                .map((nav) => {
+                  const active = state.view === nav.id;
+                  return `
+                    <button
+                      type="button"
+                      data-go-view="${nav.id}"
+                      class="flex min-h-[40px] w-full items-center justify-between rounded-xl px-3 py-2 text-left font-medium transition ${
+                        active
+                          ? 'bg-indigo-500/15 text-sky-700 dark:text-sky-300'
+                          : 'text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-indigo-950/60'
+                      }"
+                    >
+                      <span>${nav.label}</span>
+                      ${
+                        nav.badge
+                          ? `<span class="text-[10px] text-slate-400 dark:text-slate-500">${escapeHtml(
+                              nav.badge
+                            )}</span>`
+                          : ''
+                      }
+                    </button>
+                  `;
+                })
+                .join('')}
+            </nav>
+
+            <div class="flex-1 overflow-y-auto px-2.5 py-3">
+              <div class="mb-2 px-2 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                最近の会話
+              </div>
+              ${
+                recent.length === 0
+                  ? `<p class="px-2 py-4 text-xs text-slate-500 dark:text-slate-400">まだ会話履歴はありません。</p>`
+                  : `<ul class="space-y-1">
+                      ${recent
+                        .map((c) => {
+                          const isSelected =
+                            state.view === 'chat' && state.currentConversationId === c.id;
+                          return `
+                            <li>
+                              <div class="flex min-h-[40px] items-center justify-between rounded-xl px-2.5 py-1 text-xs transition ${
+                                isSelected
+                                  ? 'bg-violet-500/15 font-medium text-slate-900 dark:text-white'
+                                  : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-indigo-950/60'
+                              }">
+                                <button
+                                  type="button"
+                                  data-open-conv="${escapeHtml(c.id)}"
+                                  class="min-w-0 flex-1 truncate py-1.5 pr-2 text-left"
+                                >
+                                  ${escapeHtml(c.title)}
+                                </button>
+                                <button
+                                  type="button"
+                                  data-del-conv="${escapeHtml(c.id)}"
+                                  aria-label="会話を削除"
+                                  class="rounded-lg p-1.5 text-slate-400 hover:bg-rose-500/10 hover:text-rose-500"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            </li>
+                          `;
+                        })
+                        .join('')}
+                    </ul>`
+              }
+            </div>
+
+            <div class="flex items-center justify-between border-t border-slate-200/80 px-3 py-2.5 dark:border-indigo-400/15">
+              <span class="text-[11px] text-slate-500 dark:text-slate-400">
+                ${state.theme === 'dark' ? 'ダークモード' : 'ライトモード'}
+              </span>
+              <button
+                type="button"
+                id="drawer-theme-toggle"
+                class="min-h-[36px] rounded-xl border border-slate-200 px-3 py-1 text-xs font-medium text-slate-700 transition hover:bg-slate-100 dark:border-indigo-400/20 dark:text-slate-200 dark:hover:bg-indigo-950/60"
+              >
+                切替
+              </button>
+            </div>
+          </aside>
+        `;
+      }
+
+      function renderHomeView() {
+        const space = getCurrentSpace();
+        const recent = state.conversations.slice(0, 3);
+
+        return `
+          <div class="flex-1 overflow-y-auto px-4 py-7 sm:px-6 sm:py-10">
+            <div class="mx-auto flex max-w-xl flex-col items-center text-center kairo-appear">
+              ${renderKairoAvatar('hero', state.avatarMood)}
+
+              <p class="mt-4 text-xs font-semibold tracking-[0.26em] text-sky-600 dark:text-sky-300">
+                KAIRO
+              </p>
+
+              <h1 class="mt-2.5 text-lg font-medium leading-relaxed text-slate-800 dark:text-slate-100 sm:text-xl">
+                ${escapeHtml(getCompanionGreeting())}
+              </h1>
+
+              <div class="mt-6 flex w-full flex-col gap-2.5 sm:w-auto sm:flex-row">
+                <button
+                  type="button"
+                  id="home-new-chat-btn"
+                  class="min-h-[46px] rounded-2xl bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600 px-6 py-3 text-sm font-medium text-white shadow-lg shadow-indigo-950/20 transition hover:brightness-110"
+                >
+                  新しい会話
+                </button>
+                <button
+                  type="button"
+                  data-go-view="spaces"
+                  class="min-h-[46px] rounded-2xl border border-indigo-400/25 bg-white/85 px-5 py-3 text-sm font-medium text-slate-700 transition hover:bg-white dark:bg-[#0d142e]/85 dark:text-slate-200 dark:hover:bg-[#121c3d]"
+                >
+                  Space: ${escapeHtml(space.shortLabel)}
+                </button>
+              </div>
+
+              <!-- 最近の会話 -->
+              <section class="mt-9 w-full text-left">
+                <div class="mb-2.5 flex items-center justify-between px-1">
+                  <h2 class="text-xs font-medium text-slate-500 dark:text-slate-400">最近の会話</h2>
+                  ${
+                    state.conversations.length > 0
+                      ? `<button type="button" id="home-all-history-btn" class="text-xs text-sky-600 hover:underline dark:text-sky-300">すべて見る</button>`
+                      : ''
+                  }
+                </div>
+
+                ${
+                  recent.length === 0
+                    ? `<div class="rounded-2xl border border-slate-200/80 bg-white/75 px-4 py-4 text-xs text-slate-500 dark:border-indigo-400/15 dark:bg-[#0b1128]/75 dark:text-slate-400">
+                        まだ会話はありません。「新しい会話」から気軽に話しかけてみてください。
+                      </div>`
+                    : `<div class="space-y-2">
+                        ${recent
+                          .map(
+                            (conv) => `
+                              <button
+                                type="button"
+                                data-open-conv="${escapeHtml(conv.id)}"
+                                class="flex min-h-[48px] w-full items-center justify-between rounded-2xl border border-slate-200/80 bg-white/85 px-4 py-3 text-left transition hover:border-violet-400/45 dark:border-indigo-400/15 dark:bg-[#0b1128]/85 dark:hover:bg-[#101836]"
+                              >
+                                <span class="truncate pr-3 text-sm text-slate-800 dark:text-slate-100">${escapeHtml(
+                                  conv.title
+                                )}</span>
+                                <span class="shrink-0 text-[11px] text-slate-400">${formatDateShort(
+                                  conv.updatedAt
+                                )}</span>
+                              </button>
+                            `
+                          )
+                          .join('')}
+                      </div>`
+                }
+              </section>
+
+              <!-- Spaces / Daily / Memory -->
+              <section class="mt-7 grid w-full grid-cols-3 gap-2.5">
+                <button
+                  type="button"
+                  data-go-view="spaces"
+                  class="flex min-h-[60px] flex-col justify-center rounded-2xl border border-slate-200/80 bg-white/85 px-3.5 py-2.5 text-left transition hover:border-sky-400/50 dark:border-indigo-400/15 dark:bg-[#0b1128]/85"
+                >
+                  <span class="text-xs font-semibold text-slate-800 dark:text-slate-100">Spaces</span>
+                  <span class="mt-0.5 text-[11px] text-sky-600 dark:text-sky-300">${escapeHtml(
+                    space.shortLabel
+                  )}</span>
+                </button>
+
+                <button
+                  type="button"
+                  data-go-view="daily"
+                  class="flex min-h-[60px] flex-col justify-center rounded-2xl border border-slate-200/80 bg-white/85 px-3.5 py-2.5 text-left transition hover:border-sky-400/50 dark:border-indigo-400/15 dark:bg-[#0b1128]/85"
+                >
+                  <span class="text-xs font-semibold text-slate-800 dark:text-slate-100">Daily</span>
+                  <span class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">${
+                    state.dailies.length
+                  }件の記録</span>
+                </button>
+
+                <button
+                  type="button"
+                  data-go-view="memory"
+                  class="flex min-h-[60px] flex-col justify-center rounded-2xl border border-slate-200/80 bg-white/85 px-3.5 py-2.5 text-left transition hover:border-sky-400/50 dark:border-indigo-400/15 dark:bg-[#0b1128]/85"
+                >
+                  <span class="text-xs font-semibold text-slate-800 dark:text-slate-100">Memory</span>
+                  <span class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">${
+                    state.memories.length
+                  }件のメモ</span>
+                </button>
+              </section>
+
+              <!-- プレビュー用APIキー設定と本番環境サーバー管理の案内 -->
+              <section class="mt-6 w-full rounded-2xl border border-slate-200/80 bg-white/80 p-4 text-left dark:border-indigo-400/15 dark:bg-[#0b1128]/80">
+                <div class="flex flex-col gap-2 sm:flex-row sm:items-end">
+                  <div class="min-w-0 flex-1">
+                    <label for="preview-api-key" class="block text-xs font-medium text-slate-700 dark:text-slate-200">
+                      Gemini API キー（プレビュー検証用・セッション/メモリ保持）
+                    </label>
+                    <input
+                      id="preview-api-key"
+                      type="password"
+                      value="${escapeHtml(state.apiKey)}"
+                      placeholder="プレビュー確認用のAPIキーを入力"
+                      class="mt-1.5 min-h-[40px] w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs focus:border-sky-400 focus:outline-none dark:border-indigo-400/20 dark:bg-[#060916]"
+                    />
+                  </div>
+                  <div class="flex gap-2">
+                    <button
+                      type="button"
+                      id="save-preview-key-btn"
+                      class="min-h-[40px] rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-indigo-500"
+                    >
+                      反映
+                    </button>
+                    ${
+                      state.apiKey
+                        ? `<button
+                            type="button"
+                            id="clear-preview-key-btn"
+                            class="min-h-[40px] rounded-xl border border-slate-300 px-3 py-2 text-xs dark:border-indigo-400/20"
+                          >
+                            消去
+                          </button>`
+                        : ''
+                    }
+                  </div>
+                </div>
+                <p class="mt-2 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                  ※ブラウザプレビューでのテスト用に現在のセッション/メモリ内のみで保持します（ソースコード直書きなし）。本番運用では必ずサーバー側環境変数（例: <code class="font-mono">GEMINI_API_KEY</code>）で管理し、クライアントへ露出させないでください。
+                </p>
+              </section>
+            </div>
+          </div>
+        `;
+      }
+
+      function renderChatView() {
+        const conv = getCurrentConversation();
+        const space = getCurrentSpace();
+        const msgs = conv ? conv.messages : [];
+
+        return `
+          <div id="chat-scroll-area" class="flex-1 overflow-y-auto px-4 py-5 sm:px-6">
+            <div class="mx-auto max-w-2xl space-y-6">
+              ${
+                msgs.length === 0
+                  ? `<div class="py-10 text-center kairo-appear">
+                      <div class="flex justify-center">${renderKairoAvatar('compact', state.avatarMood)}</div>
+                      <p class="mt-3 text-sm text-slate-600 dark:text-slate-300">
+                        ${escapeHtml(space.description)}
+                      </p>
+                    </div>`
+                  : msgs
+                      .map((m) => {
+                        if (m.role === 'user') {
+                          return `
+                            <div class="flex justify-end kairo-appear">
+                              <div class="max-w-[85%] rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-600 px-4 py-3 text-sm leading-relaxed text-white sm:max-w-[75%]">
+                                <p class="whitespace-pre-wrap">${escapeHtml(m.content)}</p>
+                              </div>
+                            </div>
+                          `;
+                        }
+
+                        const isStreamingMsg = m.status === 'streaming';
+                        const isCopied = state.copiedKey === m.id;
+                        const mood = isStreamingMsg ? 'speaking' : 'calm';
+
+                        return `
+                          <div class="flex items-start gap-3 kairo-appear">
+                            <div class="mt-1">${renderKairoAvatar('compact', mood)}</div>
+                            <div class="min-w-0 flex-1">
+                              <div class="rounded-2xl border border-slate-200/80 bg-white/90 px-4 py-3.5 dark:border-indigo-400/15 dark:bg-[#0b1128]/90 ${
+                                isStreamingMsg ? 'kairo-streaming' : ''
+                              }">
+                                <div data-stream-body="${escapeHtml(m.id)}">
+                                  ${
+                                    m.content
+                                      ? renderMarkdown(m.content)
+                                      : isStreamingMsg
+                                      ? '<span class="text-xs text-slate-400">…</span>'
+                                      : ''
+                                  }
+                                </div>
+                                ${
+                                  m.status === 'error' && m.errorText
+                                    ? `<p class="mt-2 text-xs text-rose-500 dark:text-rose-400">${escapeHtml(
+                                        m.errorText
+                                      )}</p>`
+                                    : ''
+                                }
+                              </div>
+                              ${
+                                m.content && !isStreamingMsg
+                                  ? `<button
+                                      type="button"
+                                      data-copy-msg="${escapeHtml(m.id)}"
+                                      class="mt-1.5 min-h-[32px] rounded-lg px-2 py-1 text-[11px] text-slate-500 transition hover:bg-slate-200/60 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-indigo-950/70 dark:hover:text-slate-100"
+                                    >
+                                      ${isCopied ? 'コピーしました' : 'コピー'}
+                                    </button>`
+                                  : ''
+                              }
+                            </div>
+                          </div>
+                        `;
+                      })
+                      .join('')
+              }
+            </div>
+          </div>
+
+          <div class="border-t border-slate-200/80 bg-slate-100/90 px-4 py-3 backdrop-blur-md dark:border-indigo-400/15 dark:bg-[#060916]/90">
+            <form id="chat-composer" class="mx-auto flex max-w-2xl items-end gap-2 rounded-2xl border border-indigo-400/20 bg-white p-2 shadow-xs focus-within:border-sky-400/60 dark:bg-[#0b1128]">
+              <textarea
+                id="chat-input"
+                rows="1"
+                placeholder="${escapeHtml(space.shortLabel)}でKAIROに話しかける…"
+                class="max-h-36 min-h-[40px] flex-1 resize-none bg-transparent px-2.5 py-2 text-sm leading-relaxed text-slate-900 placeholder-slate-400 focus:outline-none dark:text-slate-100 dark:placeholder-slate-500"
+              >${escapeHtml(state.draft)}</textarea>
+
+              ${
+                state.isStreaming
+                  ? `<button
+                      type="button"
+                      id="stop-btn"
+                      class="min-h-[40px] shrink-0 rounded-xl bg-slate-900 px-3.5 py-2 text-xs font-medium text-white dark:bg-slate-100 dark:text-slate-950"
+                    >
+                      停止
+                    </button>`
+                  : `<button
+                      type="submit"
+                      id="send-btn"
+                      class="min-h-[40px] shrink-0 rounded-xl bg-gradient-to-r from-blue-600 to-violet-600 px-4 py-2 text-xs font-medium text-white transition hover:brightness-110"
+                    >
+                      送信
+                    </button>`
+              }
+            </form>
+          </div>
+        `;
+      }
+
+      function renderSpacesView() {
+        return `
+          <div class="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
+            <div class="mx-auto max-w-2xl space-y-4 kairo-appear">
+              <div>
+                <h1 class="text-base font-semibold">Spaces</h1>
+                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  会話の空気や視点に合わせてKAIROのモードを切り替えます。
+                </p>
+              </div>
+              <div class="space-y-3">
+                ${SPACES.map((sp) => {
+                  const isActive = sp.id === state.activeSpaceId;
+                  return `
+                    <div class="rounded-2xl border p-4 transition ${
+                      isActive
+                        ? 'border-sky-400 bg-sky-500/10 dark:bg-indigo-950/65'
+                        : 'border-slate-200/80 bg-white/85 dark:border-indigo-400/15 dark:bg-[#0b1128]/85'
+                    }">
+                      <div class="flex items-center justify-between gap-3">
+                        <div>
+                          <div class="text-sm font-semibold">${escapeHtml(sp.name)}</div>
+                          <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">${escapeHtml(
+                            sp.description
+                          )}</p>
+                        </div>
+                        <button
+                          type="button"
+                          data-select-space="${sp.id}"
+                          class="min-h-[38px] shrink-0 rounded-xl px-3.5 py-1.5 text-xs font-medium transition ${
+                            isActive
+                              ? 'bg-sky-500/20 text-sky-700 dark:text-sky-300'
+                              : 'bg-gradient-to-r from-blue-600 to-violet-600 text-white hover:brightness-110'
+                          }"
+                        >
+                          ${isActive ? '選択中' : '使う'}
+                        </button>
+                      </div>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      function renderDailyView() {
+        const moods = ['穏やか', 'すっきり', '少し疲れ気味', '考え事多め', 'わくわく'];
+        return `
+          <div class="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
+            <div class="mx-auto max-w-2xl space-y-6 kairo-appear">
+              <div>
+                <h1 class="text-base font-semibold">Daily</h1>
+                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  気分やひとことメモを記録できます。
+                </p>
+              </div>
+
+              <form id="daily-form" class="space-y-4 rounded-2xl border border-slate-200/80 bg-white/90 p-4 dark:border-indigo-400/15 dark:bg-[#0b1128]/85">
+                <div>
+                  <span class="block text-xs font-medium text-slate-600 dark:text-slate-300">気分</span>
+                  <div class="mt-2 flex flex-wrap gap-2">
+                    ${moods
+                      .map(
+                        (m) => `
+                          <button
+                            type="button"
+                            data-pick-mood="${escapeHtml(m)}"
+                            class="min-h-[36px] rounded-full border px-3.5 py-1 text-xs transition ${
+                              state.dailyMood === m
+                                ? 'border-violet-400 bg-violet-500/15 font-medium text-violet-700 dark:text-violet-300'
+                                : 'border-slate-200 text-slate-600 dark:border-indigo-400/20 dark:text-slate-300'
+                            }"
+                          >
+                            ${escapeHtml(m)}
+                          </button>
+                        `
+                      )
+                      .join('')}
+                  </div>
+                </div>
+
+                <div>
+                  <label for="daily-note" class="block text-xs font-medium text-slate-600 dark:text-slate-300">
+                    メモ（任意）
+                  </label>
+                  <input
+                    id="daily-note"
+                    type="text"
+                    value="${escapeHtml(state.dailyNote)}"
+                    placeholder="今日のメモ"
+                    class="mt-1.5 min-h-[42px] w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-sm focus:border-sky-400 focus:outline-none dark:border-indigo-400/20 dark:bg-[#060916]"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  class="min-h-[40px] rounded-xl bg-gradient-to-r from-blue-600 to-violet-600 px-4 py-2 text-xs font-medium text-white hover:brightness-110"
+                >
+                  記録する
+                </button>
+              </form>
+
+              <div class="space-y-2.5">
+                ${
+                  state.dailies.length === 0
+                    ? `<p class="text-xs text-slate-500 dark:text-slate-400">まだ記録はありません。</p>`
+                    : state.dailies
+                        .map(
+                          (entry) => `
+                            <div class="flex items-start justify-between gap-3 rounded-2xl border border-slate-200/80 bg-white/85 p-3.5 dark:border-indigo-400/15 dark:bg-[#0b1128]/80">
+                              <div>
+                                <div class="flex items-center gap-2 text-xs">
+                                  <span class="font-semibold text-sky-600 dark:text-sky-300">${escapeHtml(
+                                    entry.mood
+                                  )}</span>
+                                  <span class="text-[11px] text-slate-400">${formatDateShort(
+                                    entry.createdAt
+                                  )}</span>
+                                </div>
+                                ${
+                                  entry.note
+                                    ? `<p class="mt-1 text-sm text-slate-700 dark:text-slate-200">${escapeHtml(
+                                        entry.note
+                                      )}</p>`
+                                    : ''
+                                }
+                              </div>
+                              <button
+                                type="button"
+                                data-del-daily="${escapeHtml(entry.id)}"
+                                class="min-h-[32px] rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-rose-500/10 hover:text-rose-500"
+                              >
+                                削除
+                              </button>
+                            </div>
+                          `
+                        )
+                        .join('')
+                }
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      function renderMemoryView() {
+        const tags = ['メモ', '学び', '好み・スタイル'];
+        return `
+          <div class="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
+            <div class="mx-auto max-w-2xl space-y-6 kairo-appear">
+              <div>
+                <h1 class="text-base font-semibold">Memory</h1>
+                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  あなたが追加・編集・削除したメモを会話の文脈に反映します。
+                </p>
+              </div>
+
+              <form id="memory-form" class="space-y-3 rounded-2xl border border-slate-200/80 bg-white/90 p-4 dark:border-indigo-400/15 dark:bg-[#0b1128]/85">
+                <div class="flex flex-wrap gap-2">
+                  ${tags
+                    .map(
+                      (t) => `
+                        <button
+                          type="button"
+                          data-pick-mem-tag="${escapeHtml(t)}"
+                          class="min-h-[34px] rounded-full border px-3 py-1 text-xs transition ${
+                            state.memoryTag === t
+                              ? 'border-sky-400 bg-sky-500/15 font-medium text-sky-700 dark:text-sky-300'
+                              : 'border-slate-200 text-slate-600 dark:border-indigo-400/20 dark:text-slate-300'
+                          }"
+                        >
+                          ${escapeHtml(t)}
+                        </button>
+                      `
+                    )
+                    .join('')}
+                </div>
+
+                <div class="flex flex-col gap-2 sm:flex-row">
+                  <input
+                    id="memory-input"
+                    type="text"
+                    value="${escapeHtml(state.memoryDraft)}"
+                    placeholder="残しておきたいメモを入力"
+                    class="min-h-[42px] flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-sm focus:border-sky-400 focus:outline-none dark:border-indigo-400/20 dark:bg-[#060916]"
+                  />
+                  <button
+                    type="submit"
+                    class="min-h-[42px] shrink-0 rounded-xl bg-gradient-to-r from-blue-600 to-violet-600 px-4 py-2 text-xs font-medium text-white hover:brightness-110"
+                  >
+                    追加
+                  </button>
+                </div>
+              </form>
+
+              <div class="space-y-2.5">
+                ${
+                  state.memories.length === 0
+                    ? `<p class="text-xs text-slate-500 dark:text-slate-400">保存されたメモはありません。</p>`
+                    : state.memories
+                        .map((item) => {
+                          const editing = state.editingMemoryId === item.id;
+                          return `
+                            <div class="rounded-2xl border border-slate-200/80 bg-white/85 p-3.5 dark:border-indigo-400/15 dark:bg-[#0b1128]/80">
+                              ${
+                                editing
+                                  ? `<div class="space-y-2">
+                                      <input
+                                        id="memory-edit-input"
+                                        type="text"
+                                        value="${escapeHtml(state.editingMemoryText)}"
+                                        class="min-h-[40px] w-full rounded-xl border border-sky-400/50 bg-slate-50 px-3 py-1.5 text-sm focus:outline-none dark:bg-[#060916]"
+                                      />
+                                      <div class="flex gap-2">
+                                        <button type="button" data-save-mem="${escapeHtml(
+                                          item.id
+                                        )}" class="min-h-[34px] rounded-lg bg-sky-600 px-3 py-1 text-xs text-white">
+                                          保存
+                                        </button>
+                                        <button type="button" id="cancel-mem-edit" class="min-h-[34px] rounded-lg border border-slate-300 px-3 py-1 text-xs dark:border-indigo-400/20">
+                                          取消
+                                        </button>
+                                      </div>
+                                    </div>`
+                                  : `<div class="flex items-start justify-between gap-3">
+                                      <div>
+                                        <span class="inline-block rounded-full bg-violet-500/12 px-2.5 py-0.5 text-[10px] font-medium text-violet-700 dark:text-violet-300">
+                                          ${escapeHtml(item.tag)}
+                                        </span>
+                                        <p class="mt-1.5 text-sm text-slate-800 dark:text-slate-100">${escapeHtml(
+                                          item.text
+                                        )}</p>
+                                      </div>
+                                      <div class="flex shrink-0 gap-1">
+                                        <button type="button" data-edit-mem="${escapeHtml(
+                                          item.id
+                                        )}" class="min-h-[32px] rounded-lg px-2 py-1 text-xs text-slate-500 hover:bg-slate-200/60 dark:text-slate-400 dark:hover:bg-indigo-950/70">
+                                          編集
+                                        </button>
+                                        <button type="button" data-del-mem="${escapeHtml(
+                                          item.id
+                                        )}" class="min-h-[32px] rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-rose-500/10 hover:text-rose-500">
+                                          削除
+                                        </button>
+                                      </div>
+                                    </div>`
+                              }
+                            </div>
+                          `;
+                        })
+                        .join('')
+                }
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      function render() {
+        const root = document.getElementById('app');
+        if (!root) return;
+
+        const conv = getCurrentConversation();
+        const space = getCurrentSpace();
+
+        const headerTitle =
+          state.view === 'home'
+            ? 'KAIRO'
+            : state.view === 'chat'
+            ? conv
+              ? conv.title
+              : `新しい会話（${space.shortLabel}）`
+            : state.view === 'spaces'
+            ? 'Spaces'
+            : state.view === 'daily'
+            ? 'Daily'
+            : 'Memory';
+
+        let mainContent = '';
+        if (state.view === 'home') mainContent = renderHomeView();
+        else if (state.view === 'chat') mainContent = renderChatView();
+        else if (state.view === 'spaces') mainContent = renderSpacesView();
+        else if (state.view === 'daily') mainContent = renderDailyView();
+        else mainContent = renderMemoryView();
+
+        root.innerHTML = `
+          ${
+            state.drawerOpen
+              ? `<div id="drawer-scrim" class="fixed inset-0 z-30 bg-slate-950/55 md:hidden"></div>`
+              : ''
+          }
+          ${renderDrawer()}
+
+          <div class="relative flex min-w-0 flex-1 flex-col bg-gradient-to-b from-slate-100 via-indigo-50/40 to-slate-100 dark:from-[#060916] dark:via-[#0a1026] dark:to-[#0e1533]">
+            <div class="pointer-events-none absolute -top-24 right-10 h-72 w-72 rounded-full bg-violet-600/10 blur-3xl dark:bg-violet-600/15"></div>
+            <div class="pointer-events-none absolute bottom-10 left-8 h-64 w-64 rounded-full bg-blue-500/10 blur-3xl dark:bg-sky-500/10"></div>
+
+            <header class="relative z-10 flex h-14 shrink-0 items-center justify-between border-b border-slate-200/80 bg-white/80 px-3.5 backdrop-blur-md dark:border-indigo-400/15 dark:bg-[#060916]/80 sm:px-5">
+              <div class="flex min-w-0 items-center gap-2">
+                <button
+                  type="button"
+                  id="mobile-menu-btn"
+                  aria-label="メニューを開く"
+                  class="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl text-slate-700 hover:bg-slate-200/60 dark:text-slate-200 dark:hover:bg-indigo-950/70 md:hidden"
+                >
+                  <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M4 6h16M4 12h16M4 18h16" />
+                  </svg>
+                </button>
+                <span class="truncate text-sm font-medium">${escapeHtml(headerTitle)}</span>
+              </div>
+
+              <div class="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  id="header-theme-btn"
+                  class="min-h-[36px] rounded-xl px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-200/60 dark:text-slate-300 dark:hover:bg-indigo-950/70"
+                >
+                  ${state.theme === 'dark' ? 'ライト' : 'ダーク'}
+                </button>
+                ${
+                  state.view !== 'home'
+                    ? `<button type="button" id="header-home-btn" class="min-h-[36px] rounded-xl px-2.5 py-1 text-xs text-slate-600 hover:bg-slate-200/60 dark:text-slate-300 dark:hover:bg-indigo-950/70">
+                        ホーム
+                      </button>`
+                    : ''
+                }
+                ${
+                  state.view === 'chat'
+                    ? `<button type="button" id="header-new-chat-btn" class="min-h-[36px] rounded-xl border border-indigo-400/25 bg-indigo-500/10 px-2.5 py-1 text-xs font-medium text-slate-800 dark:text-slate-100">
+                        新しい会話
+                      </button>`
+                    : ''
+                }
+              </div>
+            </header>
+
+            ${
+              state.errorMessage
+                ? `<div role="alert" class="relative z-10 flex items-center justify-between gap-2 border-b border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-xs text-rose-600 dark:text-rose-300">
+                    <span class="min-w-0 flex-1">${escapeHtml(state.errorMessage)}</span>
+                    <button type="button" id="close-error-btn" class="min-h-[32px] shrink-0 rounded-lg px-2 py-1 text-[11px] font-medium hover:bg-rose-500/15">
+                      閉じる
+                    </button>
+                  </div>`
+                : ''
+            }
+
+            <div class="relative z-10 flex min-h-0 flex-1 flex-col">
+              ${mainContent}
+            </div>
+          </div>
+        `;
+
+        bindAllEvents();
+        autoResizeComposer();
+      }
+
+      function autoResizeComposer() {
+        const input = document.getElementById('chat-input');
+        if (!input) return;
+        input.style.height = 'auto';
+        input.style.height = `${Math.min(input.scrollHeight, 144)}px`;
+      }
+
+      function bindAllEvents() {
+        const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+        if (mobileMenuBtn) {
+          mobileMenuBtn.addEventListener('click', () => {
+            state.drawerOpen = !state.drawerOpen;
+            render();
+          });
+        }
+
+        const allHistoryBtn = document.getElementById('home-all-history-btn');
+        if (allHistoryBtn) {
+          allHistoryBtn.addEventListener('click', () => {
+            state.drawerOpen = true;
+            render();
+          });
+        }
+
+        const drawerScrim = document.getElementById('drawer-scrim');
+        if (drawerScrim) {
+          drawerScrim.addEventListener('click', () => {
+            state.drawerOpen = false;
+            render();
+          });
+        }
+
+        const drawerBrand = document.getElementById('drawer-home-brand');
+        if (drawerBrand) drawerBrand.addEventListener('click', goHome);
+
+        const headerHomeBtn = document.getElementById('header-home-btn');
+        if (headerHomeBtn) headerHomeBtn.addEventListener('click', goHome);
+
+        const homeNewChatBtn = document.getElementById('home-new-chat-btn');
+        if (homeNewChatBtn) homeNewChatBtn.addEventListener('click', () => startNewChat(true));
+
+        const drawerNewChatBtn = document.getElementById('drawer-new-chat');
+        if (drawerNewChatBtn) drawerNewChatBtn.addEventListener('click', () => startNewChat(true));
+
+        const headerNewChatBtn = document.getElementById('header-new-chat-btn');
+        if (headerNewChatBtn) headerNewChatBtn.addEventListener('click', () => startNewChat(true));
+
+        document.querySelectorAll('[data-go-view]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const targetView = btn.getAttribute('data-go-view');
+            if (targetView) {
+              state.view = targetView;
+              state.drawerOpen = false;
+              render();
+            }
+          });
+        });
+
+        document.querySelectorAll('[data-open-conv]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const id = btn.getAttribute('data-open-conv');
+            if (id) openConversation(id);
+          });
+        });
+
+        document.querySelectorAll('[data-del-conv]').forEach((btn) => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const id = btn.getAttribute('data-del-conv');
+            if (id) deleteConversation(id);
+          });
+        });
+
+        const toggleThemeAction = () => {
+          state.theme = state.theme === 'dark' ? 'light' : 'dark';
+          saveTheme(state.theme);
+          render();
+        };
+
+        const drawerThemeToggle = document.getElementById('drawer-theme-toggle');
+        if (drawerThemeToggle) drawerThemeToggle.addEventListener('click', toggleThemeAction);
+
+        const headerThemeBtn = document.getElementById('header-theme-btn');
+        if (headerThemeBtn) headerThemeBtn.addEventListener('click', toggleThemeAction);
+
+        const savePreviewKeyBtn = document.getElementById('save-preview-key-btn');
+        if (savePreviewKeyBtn) {
+          savePreviewKeyBtn.addEventListener('click', () => {
+            const keyInput = document.getElementById('preview-api-key');
+            state.apiKey = keyInput ? keyInput.value.trim() : '';
+            savePreviewApiKey(state.apiKey);
+            saveModel(state.model || DEFAULT_MODEL);
+            state.errorMessage = null;
+            render();
+          });
+        }
+
+        const clearPreviewKeyBtn = document.getElementById('clear-preview-key-btn');
+        if (clearPreviewKeyBtn) {
+          clearPreviewKeyBtn.addEventListener('click', () => {
+            state.apiKey = '';
+            savePreviewApiKey('');
+            render();
+          });
+        }
+
+        const chatComposer = document.getElementById('chat-composer');
+        if (chatComposer) {
+          chatComposer.addEventListener('submit', (e) => {
+            e.preventDefault();
+            void sendMessage();
+          });
+        }
+
+        const chatInput = document.getElementById('chat-input');
+        if (chatInput) {
+          chatInput.addEventListener('input', (e) => {
+            state.draft = e.target.value;
+            autoResizeComposer();
+          });
+          chatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+              e.preventDefault();
+              void sendMessage();
+            }
+          });
+        }
+
+        const stopBtn = document.getElementById('stop-btn');
+        if (stopBtn) stopBtn.addEventListener('click', stopStreaming);
+
+        document.querySelectorAll('[data-copy-msg]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const msgId = btn.getAttribute('data-copy-msg');
+            const conv = getCurrentConversation();
+            const msg = conv && conv.messages.find((m) => m.id === msgId);
+            if (msg) void copyToClipboard(msg.content, msgId);
+          });
+        });
+
+        document.querySelectorAll('[data-copy-code]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const preId = btn.getAttribute('data-copy-code');
+            const pre = preId ? document.getElementById(preId) : null;
+            if (pre) void copyToClipboard(pre.textContent || '', preId);
+          });
+        });
+
+        document.querySelectorAll('[data-select-space]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const id = btn.getAttribute('data-select-space');
+            if (id && SPACES.some((s) => s.id === id)) {
+              state.activeSpaceId = id;
+              saveActiveSpace(id);
+              state.view = 'chat';
+              render();
+            }
+          });
+        });
+
+        document.querySelectorAll('[data-pick-mood]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const mood = btn.getAttribute('data-pick-mood');
+            if (mood) {
+              state.dailyMood = mood;
+              render();
+            }
+          });
+        });
+
+        const dailyForm = document.getElementById('daily-form');
+        if (dailyForm) {
+          dailyForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const noteEl = document.getElementById('daily-note');
+            const note = noteEl ? noteEl.value.trim() : state.dailyNote.trim();
+            state.dailies.unshift({
+              id: makeId('daily'),
+              mood: state.dailyMood,
+              note,
+              createdAt: new Date().toISOString(),
+            });
+            state.dailyNote = '';
+            saveDailies();
+            render();
+          });
+        }
+
+        document.querySelectorAll('[data-del-daily]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const id = btn.getAttribute('data-del-daily');
+            if (!id) return;
+            state.dailies = state.dailies.filter((d) => d.id !== id);
+            saveDailies();
+            render();
+          });
+        });
+
+        document.querySelectorAll('[data-pick-mem-tag]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const tag = btn.getAttribute('data-pick-mem-tag');
+            if (tag) {
+              state.memoryTag = tag;
+              render();
+            }
+          });
+        });
+
+        const memoryForm = document.getElementById('memory-form');
+        if (memoryForm) {
+          memoryForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const inputEl = document.getElementById('memory-input');
+            const text = (inputEl ? inputEl.value : state.memoryDraft).trim();
+            if (!text) return;
+            state.memories.unshift({
+              id: makeId('mem'),
+              tag: state.memoryTag,
+              text,
+              createdAt: new Date().toISOString(),
+            });
+            state.memoryDraft = '';
+            saveMemories();
+            render();
+          });
+        }
+
+        document.querySelectorAll('[data-edit-mem]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const id = btn.getAttribute('data-edit-mem');
+            const target = state.memories.find((m) => m.id === id);
+            if (target) {
+              state.editingMemoryId = target.id;
+              state.editingMemoryText = target.text;
+              render();
+            }
+          });
+        });
+
+        const cancelMemEdit = document.getElementById('cancel-mem-edit');
+        if (cancelMemEdit) {
+          cancelMemEdit.addEventListener('click', () => {
+            state.editingMemoryId = null;
+            state.editingMemoryText = '';
+            render();
+          });
+        }
+
+        document.querySelectorAll('[data-save-mem]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const id = btn.getAttribute('data-save-mem');
+            const editInput = document.getElementById('memory-edit-input');
+            const updatedText = (editInput ? editInput.value : state.editingMemoryText).trim();
+            if (!id || !updatedText) return;
+            const target = state.memories.find((m) => m.id === id);
+            if (target) {
+              target.text = updatedText;
+              saveMemories();
+            }
+            state.editingMemoryId = null;
+            state.editingMemoryText = '';
+            render();
+          });
+        });
+
+        document.querySelectorAll('[data-del-mem]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const id = btn.getAttribute('data-del-mem');
+            if (!id) return;
+            state.memories = state.memories.filter((m) => m.id !== id);
+            saveMemories();
+            render();
+          });
+        });
+
+        const closeErrorBtn = document.getElementById('close-error-btn');
+        if (closeErrorBtn) {
+          closeErrorBtn.addEventListener('click', () => {
+            state.errorMessage = null;
+            render();
+          });
+        }
+      }
+
+      applyThemeClass(state.theme);
+      render();
+    })();
+  </script>
+</body>
+</html>
