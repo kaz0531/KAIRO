@@ -64,7 +64,7 @@
 
     @keyframes kairoHalo {
       0%, 100% {
-        opacity: 0.35;
+        opacity: 0.34;
         transform: scale(0.98);
       }
       50% {
@@ -73,7 +73,7 @@
       }
     }
     .kairo-avatar-halo {
-      animation: kairoHalo 3.2s ease-in-out infinite;
+      animation: kairoHalo 3.4s ease-in-out infinite;
     }
 
     @keyframes kairoAppear {
@@ -102,11 +102,22 @@
       animation: kairoCursorBlink 0.9s infinite;
     }
 
+    @keyframes kairoPulseDot {
+      0%, 80%, 100% { opacity: 0.28; transform: scale(0.85); }
+      40% { opacity: 1; transform: scale(1.1); }
+    }
+    .kairo-dot-1 { animation: kairoPulseDot 1.2s infinite 0s; }
+    .kairo-dot-2 { animation: kairoPulseDot 1.2s infinite 0.2s; }
+    .kairo-dot-3 { animation: kairoPulseDot 1.2s infinite 0.4s; }
+
     @media (prefers-reduced-motion: reduce) {
       .kairo-avatar-float,
       .kairo-avatar-halo,
       .kairo-appear,
-      .kairo-streaming::after {
+      .kairo-streaming::after,
+      .kairo-dot-1,
+      .kairo-dot-2,
+      .kairo-dot-3 {
         animation: none !important;
       }
     }
@@ -120,76 +131,62 @@
       'use strict';
 
       /**
-       * ストレージキー定義
-       * 注意: Gemini APIキーはソースコードに埋め込まず、ブラウザプレビューの
-       * ローカル検証用にセッション/メモリ（＋任意でローカル保存）のみで扱います。
-       * 本番環境では必ずサーバー側環境変数（例: GEMINI_API_KEY）で管理してください。
+       * KAIRO 設定定数
+       * - APIキーはクライアント側に一切保持・入力せず、Cloudflare Worker 経由で安全に通信します。
        */
+      const WORKER_ENDPOINT = 'https://kairo-api.kazukifunahashi.workers.dev';
+      const REQUEST_TIMEOUT_MS = 35000;
+
       const STORAGE_KEYS = {
-        CONVERSATIONS: 'kairo_v3_conversations',
-        MEMORIES: 'kairo_v3_memories',
-        DAILIES: 'kairo_v3_dailies',
-        SPACE: 'kairo_v3_active_space',
-        THEME: 'kairo_v3_theme',
-        MODEL: 'kairo_v3_gemini_model',
+        CONVERSATIONS: 'kairo_worker_v1_conversations',
+        MEMORIES: 'kairo_worker_v1_memories',
+        DAILIES: 'kairo_worker_v1_dailies',
+        SPACE: 'kairo_worker_v1_active_space',
+        THEME: 'kairo_worker_v1_theme',
+        ACTIVE_VIEW: 'kairo_worker_v1_active_view',
+        ACTIVE_CONV: 'kairo_worker_v1_active_conv',
+        SNAPSHOTS: 'kairo_worker_v1_snapshots',
       };
 
-      const SESSION_API_KEY_KEY = 'kairo_v3_session_gemini_api_key';
-      const DEFAULT_MODEL = 'gemini-2.5-flash';
-      const REQUEST_TIMEOUT_MS = 30000;
-
-      const ABNORMAL_FINISH_REASONS = new Set([
-        'SAFETY',
-        'RECITATION',
-        'LANGUAGE',
-        'BLOCKLIST',
-        'PROHIBITED_CONTENT',
-        'SPII',
-        'MALFORMED_FUNCTION_CALL',
-        'IMAGE_SAFETY',
-        'OTHER',
-      ]);
-
-      /**
-       * 実際に機能する Spaces
-       */
       const SPACES = [
         {
           id: 'casual',
           name: '雑談',
           shortLabel: '雑談',
-          description: '気ままな日常会話や、その日のちょっとした出来事',
+          description: '気負わない日常会話や、その日のちょっとした出来事',
           promptRule:
-            '現在の空間は「雑談」。気負わず自然体で、相手のテンポに合わせた落ち着いたトーンで返してください。',
+            '現在の空間は「雑談」。自然体で落ち着いたトーンを保ち、相手の話の流れに合わせて簡潔かつ人間らしく応答してください。',
         },
         {
           id: 'dictionary',
           name: '勉強・辞書',
           shortLabel: '勉強・辞書',
-          description: '用語の意味・違い・仕組みをわかりやすく整理して調べる時間',
+          description: '言葉の意味・概念の違い・仕組みを結論から整理して調べる時間',
           promptRule:
-            '現在の空間は「勉強・辞書」。定義・結論・違いや要点を簡潔かつ正確に整理して返してください。',
+            '現在の空間は「勉強・辞書」。定義・結論・違いや仕組みの要点を前置きなく具体的に整理して返してください。',
         },
         {
           id: 'work',
           name: '仕事・整理',
           shortLabel: '仕事・整理',
-          description: 'タスクの分解、文章構成、判断材料の整理',
+          description: 'タスク分解、優先順位、文章構成、判断材料の整理',
           promptRule:
-            '現在の空間は「仕事・整理」。論点を整理し、実用的で過不足のない構成で返してください。',
+            '現在の空間は「仕事・整理」。論点を整理し、実用的で過不足のない構成と具体策を提示してください。',
         },
         {
           id: 'ideas',
           name: '相談・アイデア',
           shortLabel: '相談・アイデア',
-          description: '迷いの整理や、新しいアイデア・企画の壁打ち',
+          description: '考えの壁打ち、視点の切り替え、新しいアイデア出し',
           promptRule:
-            '現在の空間は「相談・アイデア」。過剰な肯定や質問攻めを避け、落ち着いて視点を広げる手伝いをしてください。',
+            '現在の空間は「相談・アイデア」。過剰な褒め言葉や迎合を避け、現実的な観点と新しい切り口を落ち着いて提示してください。',
         },
       ];
 
-      const fallbackStorage = new Map();
-      let memorySessionApiKey = '';
+      /**
+       * 安全なストレージラッパー（localStorage 制限時はメモリへフォールバック）
+       */
+      const memoryFallback = new Map();
 
       function readStorage(key) {
         try {
@@ -198,51 +195,19 @@
             if (val !== null) return val;
           }
         } catch {
-          // サンドボックス制限時はメモリフォールバック
+          // サンドボックス等で localStorage が制限された場合はメモリフォールバックを使用
         }
-        return fallbackStorage.has(key) ? fallbackStorage.get(key) : null;
+        return memoryFallback.has(key) ? memoryFallback.get(key) : null;
       }
 
       function writeStorage(key, value) {
-        fallbackStorage.set(key, value);
+        memoryFallback.set(key, value);
         try {
           if (typeof localStorage !== 'undefined') {
             localStorage.setItem(key, value);
           }
         } catch {
-          // サンドボックス制限時はメモリフォールバックのみ維持
-        }
-      }
-
-      /**
-       * プレビュー検証用 API キーの読み込み・保存（セッションストレージ + メモリ）
-       * ソースコードへの直書きは行いません。
-       */
-      function loadPreviewApiKey() {
-        try {
-          if (typeof sessionStorage !== 'undefined') {
-            const val = sessionStorage.getItem(SESSION_API_KEY_KEY);
-            if (typeof val === 'string' && val.trim()) {
-              memorySessionApiKey = val.trim();
-              return memorySessionApiKey;
-            }
-          }
-        } catch {
-          // ignore
-        }
-        return memorySessionApiKey;
-      }
-
-      function savePreviewApiKey(key) {
-        const clean = String(key || '').trim();
-        memorySessionApiKey = clean;
-        try {
-          if (typeof sessionStorage !== 'undefined') {
-            if (clean) sessionStorage.setItem(SESSION_API_KEY_KEY, clean);
-            else sessionStorage.removeItem(SESSION_API_KEY_KEY);
-          }
-        } catch {
-          // ignore
+          // メモリフォールバックのみ維持
         }
       }
 
@@ -278,40 +243,8 @@
         return SPACES.some((s) => s.id === id) ? id : SPACES[0].id;
       }
 
-      function saveActiveSpace(spaceId) {
-        writeStorage(STORAGE_KEYS.SPACE, spaceId);
-      }
-
-      function loadModel() {
-        return readStorage(STORAGE_KEYS.MODEL) || DEFAULT_MODEL;
-      }
-
-      function saveModel(model) {
-        writeStorage(STORAGE_KEYS.MODEL, model);
-      }
-
-      function loadConversations() {
-        return safeParseArray(readStorage(STORAGE_KEYS.CONVERSATIONS));
-      }
-
-      function saveConversations() {
-        writeStorage(STORAGE_KEYS.CONVERSATIONS, JSON.stringify(state.conversations));
-      }
-
-      function loadMemories() {
-        return safeParseArray(readStorage(STORAGE_KEYS.MEMORIES));
-      }
-
-      function saveMemories() {
-        writeStorage(STORAGE_KEYS.MEMORIES, JSON.stringify(state.memories));
-      }
-
-      function loadDailies() {
-        return safeParseArray(readStorage(STORAGE_KEYS.DAILIES));
-      }
-
-      function saveDailies() {
-        writeStorage(STORAGE_KEYS.DAILIES, JSON.stringify(state.dailies));
+      function saveActiveSpace(id) {
+        writeStorage(STORAGE_KEYS.SPACE, id);
       }
 
       function makeId(prefix) {
@@ -331,17 +264,32 @@
         }
       }
 
+      const initialConversations = safeParseArray(readStorage(STORAGE_KEYS.CONVERSATIONS));
+      const storedConvId = readStorage(STORAGE_KEYS.ACTIVE_CONV);
+      const validStoredConvId =
+        storedConvId && initialConversations.some((c) => c.id === storedConvId)
+          ? storedConvId
+          : null;
+      const storedView = readStorage(STORAGE_KEYS.ACTIVE_VIEW);
+      const validInitialView = ['home', 'chat', 'spaces', 'daily', 'memory', 'settings'].includes(
+        storedView
+      )
+        ? storedView === 'chat' && !validStoredConvId
+          ? 'home'
+          : storedView
+        : 'home';
+
       const state = {
         theme: loadTheme(),
         activeSpaceId: loadActiveSpace(),
-        apiKey: loadPreviewApiKey(),
-        model: loadModel(),
-        view: 'home', // 'home' | 'chat' | 'spaces' | 'daily' | 'memory'
+        view: validInitialView, // 'home' | 'chat' | 'spaces' | 'daily' | 'memory' | 'settings'
         drawerOpen: false,
-        conversations: loadConversations(),
-        currentConversationId: null,
-        memories: loadMemories(),
-        dailies: loadDailies(),
+        conversations: initialConversations,
+        currentConversationId: validStoredConvId,
+        spaceFilterId: 'all',
+        memories: safeParseArray(readStorage(STORAGE_KEYS.MEMORIES)),
+        dailies: safeParseArray(readStorage(STORAGE_KEYS.DAILIES)),
+        snapshots: safeParseArray(readStorage(STORAGE_KEYS.SNAPSHOTS)),
         draft: '',
         memoryDraft: '',
         memoryTag: 'メモ',
@@ -349,16 +297,38 @@
         editingMemoryText: '',
         dailyMood: '穏やか',
         dailyNote: '',
-        isStreaming: false,
-        avatarMood: 'idle',
+        importJsonDraft: '',
+        isBusy: false,
+        avatarMood: 'idle', // 'idle' | 'calm' | 'thinking' | 'speaking' | 'error'
         errorMessage: null,
+        noticeMessage: null,
         copiedKey: null,
       };
 
-      let abortController = null;
-      let streamRafId = null;
-      let pendingStreamMessage = null;
-      let streamDirty = false;
+      let activeAbortController = null;
+      let revealRafId = null;
+      let activeRevealTask = null;
+
+      function persistNavigation() {
+        writeStorage(STORAGE_KEYS.ACTIVE_VIEW, state.view);
+        writeStorage(STORAGE_KEYS.ACTIVE_CONV, state.currentConversationId || '');
+      }
+
+      function saveConversations() {
+        writeStorage(STORAGE_KEYS.CONVERSATIONS, JSON.stringify(state.conversations));
+      }
+
+      function saveMemories() {
+        writeStorage(STORAGE_KEYS.MEMORIES, JSON.stringify(state.memories));
+      }
+
+      function saveDailies() {
+        writeStorage(STORAGE_KEYS.DAILIES, JSON.stringify(state.dailies));
+      }
+
+      function saveSnapshots() {
+        writeStorage(STORAGE_KEYS.SNAPSHOTS, JSON.stringify(state.snapshots));
+      }
 
       function getCurrentSpace() {
         return SPACES.find((s) => s.id === state.activeSpaceId) || SPACES[0];
@@ -369,191 +339,150 @@
         return state.conversations.find((c) => c.id === state.currentConversationId) || null;
       }
 
-      function syncConversationTitle(conv) {
-        const userMessages = conv.messages.filter(
+      /**
+       * 会話タイトルを最初の有効なユーザーメッセージから自動生成・維持
+       */
+      function deriveConversationTitle(conv) {
+        const firstUser = conv.messages.find(
           (m) => m.role === 'user' && typeof m.content === 'string' && m.content.trim()
         );
-        if (userMessages.length === 0) return '新しい会話';
-        const latest = userMessages[userMessages.length - 1].content.replace(/\s+/g, ' ').trim();
-        const first = userMessages[0].content.replace(/\s+/g, ' ').trim();
-        const base = userMessages.length >= 2 && latest.length >= 2 ? latest : first;
-        return base.length > 22 ? `${base.slice(0, 22)}…` : base;
+        if (!firstUser) return '新しい会話';
+        const clean = firstUser.content.replace(/\s+/g, ' ').trim();
+        return clean.length > 24 ? `${clean.slice(0, 24)}…` : clean;
       }
 
       function getCompanionGreeting() {
         const now = new Date();
         const hour = now.getHours();
         const day = now.getDate();
-        const convCount = state.conversations.length;
+        const count = state.conversations.length;
         const period = hour < 5 ? '深夜' : hour < 11 ? '朝' : hour < 17 ? '昼' : '夜';
 
-        const pool = [
-          `${period}の時間ですね。何か調べたいことでも、ちょっとした話でもどうぞ。`,
+        const greetings = [
+          `${period}の時間ですね。調べたいことでも、ちょっとした話でもそのままどうぞ。`,
           'おかえりなさい。気になる言葉の意味でも、今日の出来事でも気軽に話しかけてね。',
-          'いまどんな気分ですか？言葉の整理や相談、雑談までそのままどうぞ。',
-          '静かに話せる場所を用意しています。知りたいことや考えていることを教えて。',
+          'いまどんな気分ですか？考え事の整理や雑談まで、ここからすぐ話せます。',
+          '静かに話せる場所を用意しています。知りたいことや迷っていることを教えて。',
         ];
-        return pool[(day + hour + convCount) % pool.length];
+        return greetings[(day + hour + count) % greetings.length];
       }
 
       /**
-       * KAIRO コンパニオン人格の System Instruction
+       * KAIRO 人格・Space・Memory を反映した systemInstruction の組み立て
        */
-      function buildSystemInstruction() {
-        const space = getCurrentSpace();
+      function buildSystemInstruction(spaceObj) {
+        const space = spaceObj || getCurrentSpace();
         const lines = [
-          'あなたはパーソナルAIコンパニオン「KAIRO」です。親しみやすく知的で自然体、かつ落ち着いた存在として振る舞ってください。',
-          '基本方針:',
-          '- ユーザーの発言をそのまま繰り返したり、単なる言い換えだけで返したりしない。',
-          '- 質問には具体的に答える。用語や仕組み、比較には結論や要点をわかりやすく整理する。',
-          '- 前の会話の流れを踏まえる。話題が変わったら新しい話題に焦点を合わせ、「さっきの話」など前の話題に戻ったときは直前の文脈を整理して扱う。',
-          '- 「AIのKAIROです」のような機械的・定型的な自己紹介は繰り返さない。',
-          '- 過剰に褒めたり、何でも無条件に肯定したりしない。必要に応じて率直な視点も丁寧に伝える。',
-          '- 毎回同じ質問で終わらせない。会話を無理にまとめたり閉じたりしない。ユーザーに依存を促す表現は使わない。',
+          'あなたはパーソナルAIコンパニオン「KAIRO」です。知的で自然体、落ち着いた日本語で会話してください。',
+          '厳守するルール:',
+          '1. 質問には具体的に答えること。抽象的な言い換えや前置きだけで終わらせないこと。',
+          '2. ユーザーの発言をそのまま繰り返したり、単なるオウム返し・言い換えだけで返したりしないこと。',
+          '3. 前の会話の流れを踏まえること。話題が変わったら新しい話題に焦点を合わせ、「さっきの話」など前の話題に戻ったときは直前の文脈を整理して扱うこと。',
+          '4. 過剰な共感や迎合、無条件の褒め言葉を使わないこと。必要に応じて率直な視点や根拠も丁寧に伝えること。',
+          '5. 毎回必ず質問で終わらせないこと。言い切りや考えの提示で自然に止めてよい。',
+          '6. リアルタイム情報（現在の天気・最新ニュース・外部の未接続データなど）が不確かな場合は推測で事実を捏造せず、現在取得できない点と確認方法を正直に伝えること。',
+          '7. 「私はAIのKAIROです」といった機械的な自己紹介を繰り返さないこと。',
           space.promptRule,
         ];
 
         if (state.memories.length > 0) {
-          const memLines = state.memories
-            .slice(0, 12)
+          const memItems = state.memories
+            .slice(0, 15)
             .map((m) => `- [${m.tag}] ${m.text}`)
             .join('\n');
-          lines.push(`ユーザーが保存したメモ（文脈に応じて参照）:\n${memLines}`);
+          lines.push(`ユーザーが保存したメモ（関連する場面で自然に参照）:\n${memItems}`);
         }
 
         return lines.join('\n');
       }
 
       /**
-       * 会話履歴の組み立て
-       * - status === "completed" かつ空でないメッセージのみ対象
-       * - 過去の user / assistant (model) の時系列順を維持
-       * - 連続する同一 role は直前ターンの parts 配列に { text } として統合し、交互ターンを維持
-       * - 既存履歴の末尾にすでに同一の最新ユーザーメッセージが含まれる場合は重複追加しない
-       * - latestUserMessage は末尾に1回だけ追加する
+       * 送信履歴の組み立て:
+       * - 完了済み（status === "completed"）かつ空でないターンのみを抽出
+       * - 今回送信する最新メッセージは含めず、Worker側での重複を防止
+       * - エラーターンは除外
        */
-      function buildGeminiContents(historyMessages, latestUserMessage) {
-        const normalizedLatest = String(latestUserMessage || '').trim();
-        if (!normalizedLatest) {
-          throw new Error('空のメッセージは送信できません。');
-        }
-
-        const contents = [];
-
-        for (const msg of historyMessages) {
+      function buildWorkerHistory(messages) {
+        const result = [];
+        for (const msg of messages) {
           if (!msg || msg.status !== 'completed') continue;
           const text = typeof msg.content === 'string' ? msg.content.trim() : '';
           if (!text) continue;
+          const role = msg.role === 'assistant' ? 'assistant' : 'user';
+          result.push({ role, content: text });
+        }
+        return result;
+      }
 
-          const mappedRole = msg.role === 'assistant' ? 'model' : 'user';
-          const prev = contents[contents.length - 1];
+      /**
+       * スクロール位置を最下部へ維持（上方向へ跳び戻らないように制御）
+       */
+      function scrollMessagesToBottom(force) {
+        const area = document.getElementById('chat-scroll-area');
+        if (!area) return;
+        const distanceFromBottom = area.scrollHeight - area.scrollTop - area.clientHeight;
+        if (force || distanceFromBottom < 220) {
+          area.scrollTop = area.scrollHeight;
+        }
+      }
 
-          if (prev && prev.role === mappedRole) {
-            // 連続する同一 role は直前ターンの parts に追加して統合する
-            prev.parts.push({ text });
+      /**
+       * requestAnimationFrame を用いた滑らかなタイピング／段階表示
+       */
+      function cancelRevealAnimation() {
+        if (revealRafId !== null && typeof cancelAnimationFrame === 'function') {
+          cancelAnimationFrame(revealRafId);
+        }
+        revealRafId = null;
+        activeRevealTask = null;
+      }
+
+      function revealReplySmoothly(assistantMsg, fullReply, onComplete) {
+        cancelRevealAnimation();
+
+        const totalLength = fullReply.length;
+        if (totalLength === 0 || typeof requestAnimationFrame !== 'function') {
+          assistantMsg.content = fullReply;
+          assistantMsg.status = 'completed';
+          onComplete();
+          return;
+        }
+
+        // 長文でも1.2〜1.8秒程度で快適に読み切れるステップ幅を計算
+        const targetFrames = Math.min(75, Math.max(18, Math.ceil(totalLength / 6)));
+        const charsPerFrame = Math.max(1, Math.ceil(totalLength / targetFrames));
+        let cursor = 0;
+
+        activeRevealTask = { assistantMsg, fullReply, onComplete };
+
+        const step = () => {
+          cursor = Math.min(totalLength, cursor + charsPerFrame);
+          assistantMsg.content = fullReply.slice(0, cursor);
+
+          const bodyEl = document.querySelector(`[data-stream-body="${assistantMsg.id}"]`);
+          if (bodyEl) {
+            bodyEl.innerHTML = renderMarkdown(assistantMsg.content);
+            scrollMessagesToBottom(false);
+          }
+
+          if (cursor < totalLength) {
+            revealRafId = requestAnimationFrame(step);
           } else {
-            contents.push({
-              role: mappedRole,
-              parts: [{ text }],
-            });
+            revealRafId = null;
+            activeRevealTask = null;
+            assistantMsg.content = fullReply;
+            assistantMsg.status = 'completed';
+            onComplete();
           }
-        }
+        };
 
-        const last = contents[contents.length - 1];
-        if (last && last.role === 'user') {
-          const existingText = last.parts
-            .map((p) => p.text.trim())
-            .filter(Boolean)
-            .join('\n');
-
-          if (
-            existingText === normalizedLatest ||
-            existingText.endsWith(`\n${normalizedLatest}`)
-          ) {
-            return contents;
-          }
-
-          last.parts.push({ text: normalizedLatest });
-          return contents;
-        }
-
-        contents.push({
-          role: 'user',
-          parts: [{ text: normalizedLatest }],
-        });
-
-        return contents;
+        revealRafId = requestAnimationFrame(step);
       }
 
       /**
-       * SSE 行パーサ（途中加工・短縮を行わず、受け取った text をそのまま連結）
+       * Cloudflare Worker へ POST 送信し、reply を受信する
        */
-      function consumeSseLine(rawLine, parseCtx) {
-        const line = String(rawLine || '').trim();
-        if (!line || !line.startsWith('data:')) return;
-
-        const payloadStr = line.slice('data:'.length).trim();
-        if (!payloadStr || payloadStr === '[DONE]') return;
-
-        let parsed;
-        try {
-          parsed = JSON.parse(payloadStr);
-        } catch {
-          throw new Error(
-            `Gemini SSEチャンクのJSON解析に失敗しました: ${payloadStr.slice(0, 160)}`
-          );
-        }
-
-        if (parsed && parsed.error) {
-          const statusPart = parsed.error.status ? ` [${parsed.error.status}]` : '';
-          throw new Error(
-            `Gemini APIストリームエラー${statusPart}: ${
-              parsed.error.message || '不明なエラー'
-            }`
-          );
-        }
-
-        const candidate = parsed && parsed.candidates && parsed.candidates[0];
-        if (candidate && candidate.finishReason) {
-          parseCtx.finishReason = candidate.finishReason;
-        }
-
-        const parts =
-          candidate && candidate.content && Array.isArray(candidate.content.parts)
-            ? candidate.content.parts
-            : [];
-
-        let appended = false;
-        for (const part of parts) {
-          if (part && typeof part.text === 'string' && part.text.length > 0) {
-            parseCtx.accumulatedText += part.text;
-            appended = true;
-          }
-        }
-
-        if (appended) {
-          parseCtx.onDelta(parseCtx.accumulatedText);
-        }
-      }
-
-      /**
-       * Gemini API SSE ストリーミング実行
-       * キー未設定・通信失敗・エラー応答・異常終了・空応答時は例外をスローし、
-       * ローカルフォールバックや偽装応答は一切行わない。
-       */
-      async function streamFromGemini({ apiKey, model, systemInstruction, contents, onDelta, signal }) {
-        const cleanKey = String(apiKey || '').trim();
-        if (!cleanKey) {
-          throw new Error(
-            'Gemini APIキーが設定されていません。上部のAPIキー入力欄からキーを入力してください（プレビューのセッション中のみ保持されます）。'
-          );
-        }
-
-        const targetModel = String(model || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
-        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-          targetModel
-        )}:streamGenerateContent?alt=sse`;
-
+      async function requestWorkerReply({ message, history, systemInstruction, signal }) {
         const timeoutCtrl = new AbortController();
         let timedOut = false;
         const timer = setTimeout(() => {
@@ -561,204 +490,82 @@
           timeoutCtrl.abort();
         }, REQUEST_TIMEOUT_MS);
 
-        const onExternalAbort = () => timeoutCtrl.abort();
+        const forwardAbort = () => timeoutCtrl.abort();
         if (signal) {
           if (signal.aborted) timeoutCtrl.abort();
-          else signal.addEventListener('abort', onExternalAbort, { once: true });
+          else signal.addEventListener('abort', forwardAbort, { once: true });
         }
 
         let response;
         try {
-          response = await fetch(endpoint, {
+          response = await fetch(WORKER_ENDPOINT, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'x-goog-api-key': cleanKey,
             },
             signal: timeoutCtrl.signal,
             body: JSON.stringify({
-              systemInstruction: {
-                parts: [{ text: systemInstruction }],
-              },
-              contents,
-              generationConfig: {
-                temperature: 0.7,
-              },
+              message,
+              history,
+              systemInstruction,
             }),
           });
         } catch (err) {
           clearTimeout(timer);
-          if (signal) signal.removeEventListener('abort', onExternalAbort);
+          if (signal) signal.removeEventListener('abort', forwardAbort);
           if (timedOut) {
             throw new Error(
-              `Gemini APIへの接続がタイムアウト（${REQUEST_TIMEOUT_MS / 1000}秒）しました。`
+              `KAIROサーバーへの接続がタイムアウトしました（${REQUEST_TIMEOUT_MS / 1000}秒）。通信環境を確認して再度お試しください。`
             );
           }
           if (signal && signal.aborted) {
-            throw new DOMException('応答を停止しました。', 'AbortError');
+            throw new DOMException('送信をキャンセルしました。', 'AbortError');
           }
           const detail = err instanceof Error ? err.message : String(err);
-          throw new Error(`Gemini APIへの通信に失敗しました: ${detail}`);
+          throw new Error(`通信エラーが発生しました: ${detail}`);
         }
 
         clearTimeout(timer);
-        if (signal) signal.removeEventListener('abort', onExternalAbort);
+        if (signal) signal.removeEventListener('abort', forwardAbort);
+
+        let data = null;
+        try {
+          data = await response.json();
+        } catch {
+          if (!response.ok) {
+            throw new Error(`サーバーエラーが発生しました（HTTP ${response.status}）。`);
+          }
+          throw new Error('サーバーからの応答JSONを解析できませんでした。');
+        }
 
         if (!response.ok) {
-          let detail = `HTTP ${response.status} ${response.statusText || ''}`.trim();
-          try {
-            const errJson = await response.json();
-            if (errJson && errJson.error && errJson.error.message) {
-              detail = `${response.status} (${errJson.error.status || 'API_ERROR'}): ${
-                errJson.error.message
-              }`;
-            }
-          } catch {
-            const rawText = await response.text().catch(() => '');
-            if (rawText && rawText.trim()) {
-              detail = `${response.status}: ${rawText.trim().slice(0, 300)}`;
-            }
-          }
-          throw new Error(`Gemini APIエラー（モデル: ${targetModel}）— ${detail}`);
+          const errText =
+            data && typeof data.error === 'string' && data.error.trim()
+              ? data.error.trim()
+              : `サーバーエラー（HTTP ${response.status}）`;
+          throw new Error(errText);
         }
 
-        if (!response.body) {
-          throw new Error('Gemini APIからストリームボディが返されませんでした。');
+        if (data && typeof data.error === 'string' && data.error.trim()) {
+          throw new Error(data.error.trim());
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder('utf-8');
-        let sseBuffer = '';
-
-        const parseCtx = {
-          accumulatedText: '',
-          finishReason: undefined,
-          onDelta,
-        };
-
-        try {
-          while (true) {
-            if (timeoutCtrl.signal.aborted) {
-              if (timedOut) {
-                throw new Error('Gemini APIからの受信中にタイムアウトしました。');
-              }
-              throw new DOMException('応答を停止しました。', 'AbortError');
-            }
-
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            // stream: true でマルチバイト文字を安全に逐次デコード
-            sseBuffer += decoder.decode(value, { stream: true });
-            const lines = sseBuffer.split('\n');
-            sseBuffer = lines.pop() ?? '';
-
-            for (const line of lines) {
-              consumeSseLine(line, parseCtx);
-            }
-          }
-
-          // 通信終了時に TextDecoder をフラッシュして残存バイトを回収
-          sseBuffer += decoder.decode();
-
-          // 通信終了時に残った sseBuffer も処理して最終チャンクを欠落させない
-          if (sseBuffer.length > 0) {
-            const remainingLines = sseBuffer.split('\n');
-            sseBuffer = '';
-            for (const line of remainingLines) {
-              consumeSseLine(line, parseCtx);
-            }
-          }
-        } catch (err) {
-          if (err && err.name === 'AbortError') {
-            throw err;
-          }
-          const detail = err instanceof Error ? err.message : String(err);
-          throw new Error(`SSEストリーム受信中に異常終了しました: ${detail}`);
-        } finally {
-          try {
-            reader.releaseLock();
-          } catch {
-            // ignore
-          }
+        const reply = data && typeof data.reply === 'string' ? data.reply : '';
+        if (!reply.trim()) {
+          throw new Error('KAIROサーバーから有効な返答が返りませんでした。');
         }
 
-        if (parseCtx.finishReason && ABNORMAL_FINISH_REASONS.has(parseCtx.finishReason)) {
-          throw new Error(
-            `Gemini APIの応答が正常完了しませんでした（finishReason: ${parseCtx.finishReason}）。`
-          );
-        }
-
-        if (!parseCtx.accumulatedText.trim()) {
-          throw new Error(
-            `Gemini APIから有効なテキスト応答が返されませんでした（finishReason: ${
-              parseCtx.finishReason || '未指定'
-            }）。`
-          );
-        }
-
-        return {
-          fullText: parseCtx.accumulatedText,
-          finishReason: parseCtx.finishReason,
-        };
-      }
-
-      /**
-       * requestAnimationFrame バッファリングによるストリーミング表示更新
-       */
-      function flushStreamFrame() {
-        streamRafId = null;
-        if (!streamDirty || !pendingStreamMessage) return;
-        streamDirty = false;
-
-        const el = document.querySelector(`[data-stream-body="${pendingStreamMessage.id}"]`);
-        if (el) {
-          el.innerHTML = pendingStreamMessage.content
-            ? renderMarkdown(pendingStreamMessage.content)
-            : '<span class="text-xs text-slate-400">…</span>';
-          scrollMessagesToBottom(false);
-        } else {
-          render();
-          scrollMessagesToBottom(false);
-        }
-      }
-
-      function scheduleStreamFrame(msg) {
-        pendingStreamMessage = msg;
-        streamDirty = true;
-        if (streamRafId === null && typeof requestAnimationFrame === 'function') {
-          streamRafId = requestAnimationFrame(flushStreamFrame);
-        } else if (streamRafId === null) {
-          flushStreamFrame();
-        }
-      }
-
-      function cancelStreamFrame() {
-        if (streamRafId !== null && typeof cancelAnimationFrame === 'function') {
-          cancelAnimationFrame(streamRafId);
-        }
-        streamRafId = null;
-        streamDirty = false;
-        pendingStreamMessage = null;
-      }
-
-      function scrollMessagesToBottom(force) {
-        const container = document.getElementById('chat-scroll-area');
-        if (!container) return;
-        const nearBottom =
-          container.scrollHeight - container.scrollTop - container.clientHeight < 180;
-        if (force || nearBottom) {
-          container.scrollTop = container.scrollHeight;
-        }
+        return reply;
       }
 
       async function sendMessage(overrideText) {
-        if (state.isStreaming) return;
+        if (state.isBusy) return;
         const prompt = (typeof overrideText === 'string' ? overrideText : state.draft).trim();
         if (!prompt) return;
 
         const space = getCurrentSpace();
         state.errorMessage = null;
+        state.noticeMessage = null;
         state.view = 'chat';
         state.drawerOpen = false;
         if (typeof overrideText !== 'string') {
@@ -779,9 +586,10 @@
           state.currentConversationId = conv.id;
         }
 
-        // 送信前の既存履歴を基準に組み立てる
-        const priorMessages = conv.messages.filter((m) => m.status === 'completed');
-        const contents = buildGeminiContents(priorMessages, prompt);
+        // 送信前の既存完了済みターンを history として構築（最新発話の重複を防止）
+        const historyPayload = buildWorkerHistory(conv.messages);
+        const convSpace = SPACES.find((s) => s.id === conv.spaceId) || space;
+        const systemInstruction = buildSystemInstruction(convSpace);
 
         const userMsg = {
           id: makeId('msg'),
@@ -800,109 +608,130 @@
         };
 
         conv.messages.push(userMsg, assistantMsg);
-        conv.title = syncConversationTitle(conv);
+        conv.title = deriveConversationTitle(conv);
         conv.updatedAt = new Date().toISOString();
         saveConversations();
+        persistNavigation();
 
-        state.isStreaming = true;
+        state.isBusy = true;
         state.avatarMood = 'thinking';
-        abortController = new AbortController();
+        activeAbortController = new AbortController();
 
         render();
         scrollMessagesToBottom(true);
 
         try {
-          const result = await streamFromGemini({
-            apiKey: state.apiKey,
-            model: state.model || DEFAULT_MODEL,
-            systemInstruction: buildSystemInstruction(),
-            contents,
-            signal: abortController.signal,
-            onDelta: (accumulatedText) => {
-              state.avatarMood = 'speaking';
-              assistantMsg.content = accumulatedText;
-              scheduleStreamFrame(assistantMsg);
-            },
+          const replyText = await requestWorkerReply({
+            message: prompt,
+            history: historyPayload,
+            systemInstruction,
+            signal: activeAbortController.signal,
           });
 
-          cancelStreamFrame();
-          assistantMsg.content = result.fullText;
-          assistantMsg.status = 'completed';
-          conv.title = syncConversationTitle(conv);
-          conv.updatedAt = new Date().toISOString();
-          saveConversations();
+          state.avatarMood = 'speaking';
+          render();
+          scrollMessagesToBottom(false);
+
+          revealReplySmoothly(assistantMsg, replyText, () => {
+            conv.updatedAt = new Date().toISOString();
+            saveConversations();
+            state.isBusy = false;
+            state.avatarMood = 'calm';
+            activeAbortController = null;
+            render();
+            scrollMessagesToBottom(false);
+          });
         } catch (err) {
-          cancelStreamFrame();
+          cancelRevealAnimation();
           const aborted = Boolean(err && err.name === 'AbortError');
           const detail = aborted
             ? '応答を停止しました。'
             : err instanceof Error
             ? err.message
-            : 'Gemini APIとの通信中に不明なエラーが発生しました。';
+            : '不明な通信エラーが発生しました。';
 
           if (aborted && assistantMsg.content.trim()) {
             assistantMsg.status = 'completed';
+            state.avatarMood = 'calm';
           } else {
             assistantMsg.status = 'error';
             assistantMsg.errorText = detail;
             if (!aborted) {
               state.errorMessage = detail;
+              state.avatarMood = 'error';
+            } else {
+              state.avatarMood = 'idle';
             }
           }
-          conv.title = syncConversationTitle(conv);
+
           conv.updatedAt = new Date().toISOString();
           saveConversations();
-        } finally {
-          state.isStreaming = false;
-          state.avatarMood = 'idle';
-          abortController = null;
+          state.isBusy = false;
+          activeAbortController = null;
           render();
           scrollMessagesToBottom(false);
         }
       }
 
-      function stopStreaming() {
-        if (abortController) {
-          abortController.abort();
+      function stopActiveRequest() {
+        if (activeAbortController) {
+          activeAbortController.abort();
+        }
+        if (activeRevealTask) {
+          const { assistantMsg, fullReply, onComplete } = activeRevealTask;
+          cancelRevealAnimation();
+          if (!assistantMsg.content.trim()) {
+            assistantMsg.content = fullReply;
+          }
+          assistantMsg.status = 'completed';
+          onComplete();
         }
       }
 
-      function goHome() {
-        if (state.isStreaming) stopStreaming();
-        cancelStreamFrame();
+      function navigateTo(viewName) {
+        if (state.isBusy) stopActiveRequest();
         state.errorMessage = null;
-        state.view = 'home';
+        state.view = viewName;
         state.drawerOpen = false;
-        state.avatarMood = 'idle';
+        if (viewName === 'home') {
+          state.avatarMood = 'idle';
+        }
+        persistNavigation();
         render();
       }
 
       function startNewChat(focusInput = true) {
-        if (state.isStreaming) stopStreaming();
-        cancelStreamFrame();
+        if (state.isBusy) stopActiveRequest();
         state.errorMessage = null;
         state.currentConversationId = null;
         state.draft = '';
         state.view = 'chat';
         state.drawerOpen = false;
         state.avatarMood = 'calm';
+        persistNavigation();
         render();
         if (focusInput) {
           setTimeout(() => {
             const ta = document.getElementById('chat-input');
             if (ta) ta.focus();
-          }, 25);
+          }, 30);
         }
       }
 
       function openConversation(id) {
-        if (state.isStreaming) stopStreaming();
-        cancelStreamFrame();
+        if (state.isBusy) stopActiveRequest();
+        const target = state.conversations.find((c) => c.id === id);
+        if (!target) return;
         state.errorMessage = null;
-        state.currentConversationId = id;
+        state.currentConversationId = target.id;
+        if (target.spaceId && SPACES.some((s) => s.id === target.spaceId)) {
+          state.activeSpaceId = target.spaceId;
+          saveActiveSpace(target.spaceId);
+        }
         state.view = 'chat';
         state.drawerOpen = false;
         state.avatarMood = 'calm';
+        persistNavigation();
         render();
         scrollMessagesToBottom(true);
       }
@@ -911,10 +740,127 @@
         state.conversations = state.conversations.filter((c) => c.id !== id);
         if (state.currentConversationId === id) {
           state.currentConversationId = null;
-          if (state.view === 'chat') state.view = 'home';
+          if (state.view === 'chat') {
+            state.view = 'home';
+            state.avatarMood = 'idle';
+          }
         }
         saveConversations();
+        persistNavigation();
         render();
+      }
+
+      function createSnapshot(label) {
+        const snapshot = {
+          id: makeId('snap'),
+          label: label || `バックアップ (${formatDateShort(new Date().toISOString())})`,
+          createdAt: new Date().toISOString(),
+          payload: {
+            conversations: state.conversations,
+            memories: state.memories,
+            dailies: state.dailies,
+            activeSpaceId: state.activeSpaceId,
+            theme: state.theme,
+          },
+        };
+        state.snapshots.unshift(snapshot);
+        state.snapshots = state.snapshots.slice(0, 10);
+        saveSnapshots();
+        state.noticeMessage = '現在の状態をスナップショットに保存しました。';
+        render();
+      }
+
+      function restoreSnapshot(snapId) {
+        const snap = state.snapshots.find((s) => s.id === snapId);
+        if (!snap || !snap.payload) return;
+        state.conversations = Array.isArray(snap.payload.conversations)
+          ? snap.payload.conversations
+          : [];
+        state.memories = Array.isArray(snap.payload.memories) ? snap.payload.memories : [];
+        state.dailies = Array.isArray(snap.payload.dailies) ? snap.payload.dailies : [];
+        if (snap.payload.activeSpaceId && SPACES.some((s) => s.id === snap.payload.activeSpaceId)) {
+          state.activeSpaceId = snap.payload.activeSpaceId;
+          saveActiveSpace(state.activeSpaceId);
+        }
+        if (snap.payload.theme === 'light' || snap.payload.theme === 'dark') {
+          state.theme = snap.payload.theme;
+          saveTheme(state.theme);
+        }
+        state.currentConversationId = null;
+        saveConversations();
+        saveMemories();
+        saveDailies();
+        persistNavigation();
+        state.noticeMessage = `「${snap.label}」から復元しました。`;
+        render();
+      }
+
+      function exportAllJson() {
+        const bundle = {
+          app: 'KAIRO',
+          exportedAt: new Date().toISOString(),
+          conversations: state.conversations,
+          memories: state.memories,
+          dailies: state.dailies,
+          activeSpaceId: state.activeSpaceId,
+          theme: state.theme,
+        };
+        const jsonStr = JSON.stringify(bundle, null, 2);
+        try {
+          const blob = new Blob([jsonStr], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `kairo-backup-${new Date().toISOString().slice(0, 10)}.json`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          state.noticeMessage = 'JSONバックアップファイルを書き出しました。';
+          render();
+        } catch {
+          void copyToClipboard(jsonStr, 'export_json');
+        }
+      }
+
+      function importFromJsonText(rawText) {
+        const trimmed = String(rawText || '').trim();
+        if (!trimmed) {
+          state.errorMessage = 'インポートするJSON文字列を入力してください。';
+          render();
+          return;
+        }
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (!parsed || typeof parsed !== 'object') {
+            throw new Error('JSONオブジェクトの形式が正しくありません。');
+          }
+          if (Array.isArray(parsed.conversations)) state.conversations = parsed.conversations;
+          if (Array.isArray(parsed.memories)) state.memories = parsed.memories;
+          if (Array.isArray(parsed.dailies)) state.dailies = parsed.dailies;
+          if (parsed.activeSpaceId && SPACES.some((s) => s.id === parsed.activeSpaceId)) {
+            state.activeSpaceId = parsed.activeSpaceId;
+            saveActiveSpace(state.activeSpaceId);
+          }
+          if (parsed.theme === 'light' || parsed.theme === 'dark') {
+            state.theme = parsed.theme;
+            saveTheme(state.theme);
+          }
+          state.currentConversationId = null;
+          state.importJsonDraft = '';
+          saveConversations();
+          saveMemories();
+          saveDailies();
+          persistNavigation();
+          state.errorMessage = null;
+          state.noticeMessage = 'JSONデータを取り込みました。';
+          render();
+        } catch (err) {
+          state.errorMessage = `JSONの読み込みに失敗しました: ${
+            err instanceof Error ? err.message : '形式エラー'
+          }`;
+          render();
+        }
       }
 
       function escapeHtml(str) {
@@ -1005,8 +951,26 @@
                 );
                 continue;
               }
+              if (/^\d+\.\s+/.test(current)) {
+                const numItems = [];
+                while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+                  numItems.push(lines[i].replace(/^\d+\.\s+/, ''));
+                  i += 1;
+                }
+                htmlParts.push(
+                  `<ol class="my-2 list-decimal space-y-1 pl-5 text-sm leading-relaxed">${numItems
+                    .map((item) => `<li>${formatInlineMarkdown(item)}</li>`)
+                    .join('')}</ol>`
+                );
+                continue;
+              }
               const paragraphLines = [];
-              while (i < lines.length && lines[i].trim() && !/^[-*]\s+/.test(lines[i])) {
+              while (
+                i < lines.length &&
+                lines[i].trim() &&
+                !/^[-*]\s+/.test(lines[i]) &&
+                !/^\d+\.\s+/.test(lines[i])
+              ) {
                 paragraphLines.push(lines[i]);
                 i += 1;
               }
@@ -1023,18 +987,15 @@
 
       async function copyToClipboard(text, key) {
         try {
-          if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-            await navigator.clipboard.writeText(text);
-          } else {
-            const area = document.createElement('textarea');
-            area.value = text;
-            area.style.position = 'fixed';
-            area.style.opacity = '0';
-            document.body.appendChild(area);
-            area.select();
-            document.execCommand('copy');
-            document.body.removeChild(area);
-          }
+          const area = document.createElement('textarea');
+          area.value = text;
+          area.style.position = 'fixed';
+          area.style.opacity = '0';
+          document.body.appendChild(area);
+          area.select();
+          document.execCommand('copy');
+          document.body.removeChild(area);
+
           state.copiedKey = key;
           render();
           setTimeout(() => {
@@ -1044,13 +1005,14 @@
             }
           }, 1400);
         } catch {
-          state.errorMessage = 'クリップボードへのコピーが制限されました。';
+          state.errorMessage = 'クリップボードへのコピーに失敗しました。';
           render();
         }
       }
 
       /**
-       * KAIRO オリジナル SVG アバター
+       * KAIRO カスタム SVG キャラクターアバター
+       * mood: 'idle' | 'calm' | 'thinking' | 'speaking' | 'error'
        */
       function renderKairoAvatar(variant = 'hero', mood = 'idle') {
         const isHero = variant === 'hero';
@@ -1060,19 +1022,31 @@
         let leftEye = 'M61 84 Q68 78 75 84';
         let rightEye = 'M105 84 Q112 78 119 84';
         let mouth = 'M82 107 Q90 112 98 107';
+        let ringStroke = '#818cf8';
+        let crestFill = '#c4b5fd';
 
         if (mood === 'thinking') {
-          leftEye = 'M62 85 L74 84';
+          leftEye = 'M62 85 L74 83';
           rightEye = 'M106 83 L118 85';
-          mouth = 'M84 108 Q90 106 96 108';
+          mouth = 'M84 108 Q90 105 96 108';
+          ringStroke = '#38bdf8';
+          crestFill = '#7dd3fc';
         } else if (mood === 'speaking') {
-          leftEye = 'M61 83 Q68 78 75 83';
-          rightEye = 'M105 83 Q112 78 119 83';
-          mouth = 'M84 106 Q90 114 96 106';
+          leftEye = 'M61 83 Q68 77 75 83';
+          rightEye = 'M105 83 Q112 77 119 83';
+          mouth = 'M83 106 Q90 115 97 106';
+          ringStroke = '#a78bfa';
+          crestFill = '#e9d5ff';
         } else if (mood === 'calm') {
-          leftEye = 'M62 85 Q68 82 74 85';
-          rightEye = 'M106 85 Q112 82 118 85';
-          mouth = 'M85 107 Q90 110 95 107';
+          leftEye = 'M62 85 Q68 81 74 85';
+          rightEye = 'M106 85 Q112 81 118 85';
+          mouth = 'M84 107 Q90 111 96 107';
+        } else if (mood === 'error') {
+          leftEye = 'M62 83 L74 87';
+          rightEye = 'M118 83 L106 87';
+          mouth = 'M84 110 Q90 106 96 110';
+          ringStroke = '#fb7185';
+          crestFill = '#fda4af';
         }
 
         const gradId = `kairoBodyGrad_${variant}`;
@@ -1093,7 +1067,7 @@
             >
               <defs>
                 <radialGradient id="${auraId}" cx="50%" cy="44%" r="54%">
-                  <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.3" />
+                  <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.32" />
                   <stop offset="55%" stop-color="#6366f1" stop-opacity="0.16" />
                   <stop offset="100%" stop-color="#060916" stop-opacity="0" />
                 </radialGradient>
@@ -1110,9 +1084,9 @@
                 cy="90"
                 r="70"
                 fill="none"
-                stroke="#818cf8"
-                stroke-opacity="0.26"
-                stroke-width="1.2"
+                stroke="${ringStroke}"
+                stroke-opacity="0.3"
+                stroke-width="1.3"
                 stroke-dasharray="6 6"
               />
               <path
@@ -1130,12 +1104,12 @@
                 rx="43"
                 fill="url(#${gradId})"
                 stroke="#7dd3fc"
-                stroke-opacity="0.52"
+                stroke-opacity="0.54"
                 stroke-width="2.2"
               />
               <path
                 d="M90 50 L92.5 56 L99 58.5 L92.5 61 L90 67 L87.5 61 L81 58.5 L87.5 56 Z"
-                fill="#c4b5fd"
+                fill="${crestFill}"
               />
               <path d="${leftEye}" fill="none" stroke="#f8fafc" stroke-width="4.2" stroke-linecap="round" />
               <path d="${rightEye}" fill="none" stroke="#f8fafc" stroke-width="4.2" stroke-linecap="round" />
@@ -1148,7 +1122,11 @@
       }
 
       function renderDrawer() {
-        const recent = state.conversations.slice(0, 25);
+        const filtered =
+          state.spaceFilterId === 'all'
+            ? state.conversations
+            : state.conversations.filter((c) => c.spaceId === state.spaceFilterId);
+        const recent = filtered.slice(0, 30);
         const space = getCurrentSpace();
 
         return `
@@ -1175,6 +1153,7 @@
                 { id: 'spaces', label: 'Spaces', badge: space.shortLabel },
                 { id: 'daily', label: 'Daily', badge: `${state.dailies.length}件` },
                 { id: 'memory', label: 'Memory', badge: `${state.memories.length}件` },
+                { id: 'settings', label: '設定・バックアップ', badge: '' },
               ]
                 .map((nav) => {
                   const active = state.view === nav.id;
@@ -1203,12 +1182,28 @@
             </nav>
 
             <div class="flex-1 overflow-y-auto px-2.5 py-3">
-              <div class="mb-2 px-2 text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                最近の会話
+              <div class="mb-2 flex items-center justify-between px-2">
+                <span class="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                  最近の会話
+                </span>
+                <select
+                  id="drawer-space-filter"
+                  aria-label="Spaceで絞り込み"
+                  class="rounded-lg border border-slate-200 bg-transparent px-1.5 py-0.5 text-[10px] text-slate-500 focus:outline-none dark:border-indigo-400/20 dark:text-slate-400"
+                >
+                  <option value="all" ${state.spaceFilterId === 'all' ? 'selected' : ''}>すべて</option>
+                  ${SPACES.map(
+                    (sp) =>
+                      `<option value="${sp.id}" ${
+                        state.spaceFilterId === sp.id ? 'selected' : ''
+                      }>${escapeHtml(sp.shortLabel)}</option>`
+                  ).join('')}
+                </select>
               </div>
+
               ${
                 recent.length === 0
-                  ? `<p class="px-2 py-4 text-xs text-slate-500 dark:text-slate-400">まだ会話履歴はありません。</p>`
+                  ? `<p class="px-2 py-4 text-xs text-slate-500 dark:text-slate-400">表示できる会話履歴はありません。</p>`
                   : `<ul class="space-y-1">
                       ${recent
                         .map((c) => {
@@ -1309,26 +1304,33 @@
                 ${
                   recent.length === 0
                     ? `<div class="rounded-2xl border border-slate-200/80 bg-white/75 px-4 py-4 text-xs text-slate-500 dark:border-indigo-400/15 dark:bg-[#0b1128]/75 dark:text-slate-400">
-                        まだ会話はありません。「新しい会話」から気軽に話しかけてみてください。
+                        まだ会話はありません。「新しい会話」からそのまま話しかけられます。
                       </div>`
                     : `<div class="space-y-2">
                         ${recent
-                          .map(
-                            (conv) => `
+                          .map((conv) => {
+                            const convSpace =
+                              SPACES.find((s) => s.id === conv.spaceId) || SPACES[0];
+                            return `
                               <button
                                 type="button"
                                 data-open-conv="${escapeHtml(conv.id)}"
-                                class="flex min-h-[48px] w-full items-center justify-between rounded-2xl border border-slate-200/80 bg-white/85 px-4 py-3 text-left transition hover:border-violet-400/45 dark:border-indigo-400/15 dark:bg-[#0b1128]/85 dark:hover:bg-[#101836]"
+                                class="flex min-h-[50px] w-full items-center justify-between rounded-2xl border border-slate-200/80 bg-white/85 px-4 py-3 text-left transition hover:border-violet-400/45 dark:border-indigo-400/15 dark:bg-[#0b1128]/85 dark:hover:bg-[#101836]"
                               >
-                                <span class="truncate pr-3 text-sm text-slate-800 dark:text-slate-100">${escapeHtml(
-                                  conv.title
-                                )}</span>
+                                <div class="min-w-0 flex-1 pr-3">
+                                  <div class="truncate text-sm text-slate-800 dark:text-slate-100">${escapeHtml(
+                                    conv.title
+                                  )}</div>
+                                  <div class="mt-0.5 text-[10px] text-sky-600 dark:text-sky-300/80">${escapeHtml(
+                                    convSpace.shortLabel
+                                  )}</div>
+                                </div>
                                 <span class="shrink-0 text-[11px] text-slate-400">${formatDateShort(
                                   conv.updatedAt
                                 )}</span>
                               </button>
-                            `
-                          )
+                            `;
+                          })
                           .join('')}
                       </div>`
                 }
@@ -1339,7 +1341,7 @@
                 <button
                   type="button"
                   data-go-view="spaces"
-                  class="flex min-h-[60px] flex-col justify-center rounded-2xl border border-slate-200/80 bg-white/85 px-3.5 py-2.5 text-left transition hover:border-sky-400/50 dark:border-indigo-400/15 dark:bg-[#0b1128]/85"
+                  class="flex min-h-[62px] flex-col justify-center rounded-2xl border border-slate-200/80 bg-white/85 px-3.5 py-2.5 text-left transition hover:border-sky-400/50 dark:border-indigo-400/15 dark:bg-[#0b1128]/85"
                 >
                   <span class="text-xs font-semibold text-slate-800 dark:text-slate-100">Spaces</span>
                   <span class="mt-0.5 text-[11px] text-sky-600 dark:text-sky-300">${escapeHtml(
@@ -1350,7 +1352,7 @@
                 <button
                   type="button"
                   data-go-view="daily"
-                  class="flex min-h-[60px] flex-col justify-center rounded-2xl border border-slate-200/80 bg-white/85 px-3.5 py-2.5 text-left transition hover:border-sky-400/50 dark:border-indigo-400/15 dark:bg-[#0b1128]/85"
+                  class="flex min-h-[62px] flex-col justify-center rounded-2xl border border-slate-200/80 bg-white/85 px-3.5 py-2.5 text-left transition hover:border-sky-400/50 dark:border-indigo-400/15 dark:bg-[#0b1128]/85"
                 >
                   <span class="text-xs font-semibold text-slate-800 dark:text-slate-100">Daily</span>
                   <span class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">${
@@ -1361,54 +1363,13 @@
                 <button
                   type="button"
                   data-go-view="memory"
-                  class="flex min-h-[60px] flex-col justify-center rounded-2xl border border-slate-200/80 bg-white/85 px-3.5 py-2.5 text-left transition hover:border-sky-400/50 dark:border-indigo-400/15 dark:bg-[#0b1128]/85"
+                  class="flex min-h-[62px] flex-col justify-center rounded-2xl border border-slate-200/80 bg-white/85 px-3.5 py-2.5 text-left transition hover:border-sky-400/50 dark:border-indigo-400/15 dark:bg-[#0b1128]/85"
                 >
                   <span class="text-xs font-semibold text-slate-800 dark:text-slate-100">Memory</span>
                   <span class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">${
                     state.memories.length
                   }件のメモ</span>
                 </button>
-              </section>
-
-              <!-- プレビュー用APIキー設定と本番環境サーバー管理の案内 -->
-              <section class="mt-6 w-full rounded-2xl border border-slate-200/80 bg-white/80 p-4 text-left dark:border-indigo-400/15 dark:bg-[#0b1128]/80">
-                <div class="flex flex-col gap-2 sm:flex-row sm:items-end">
-                  <div class="min-w-0 flex-1">
-                    <label for="preview-api-key" class="block text-xs font-medium text-slate-700 dark:text-slate-200">
-                      Gemini API キー（プレビュー検証用・セッション/メモリ保持）
-                    </label>
-                    <input
-                      id="preview-api-key"
-                      type="password"
-                      value="${escapeHtml(state.apiKey)}"
-                      placeholder="プレビュー確認用のAPIキーを入力"
-                      class="mt-1.5 min-h-[40px] w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs focus:border-sky-400 focus:outline-none dark:border-indigo-400/20 dark:bg-[#060916]"
-                    />
-                  </div>
-                  <div class="flex gap-2">
-                    <button
-                      type="button"
-                      id="save-preview-key-btn"
-                      class="min-h-[40px] rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-indigo-500"
-                    >
-                      反映
-                    </button>
-                    ${
-                      state.apiKey
-                        ? `<button
-                            type="button"
-                            id="clear-preview-key-btn"
-                            class="min-h-[40px] rounded-xl border border-slate-300 px-3 py-2 text-xs dark:border-indigo-400/20"
-                          >
-                            消去
-                          </button>`
-                        : ''
-                    }
-                  </div>
-                </div>
-                <p class="mt-2 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
-                  ※ブラウザプレビューでのテスト用に現在のセッション/メモリ内のみで保持します（ソースコード直書きなし）。本番運用では必ずサーバー側環境変数（例: <code class="font-mono">GEMINI_API_KEY</code>）で管理し、クライアントへ露出させないでください。
-                </p>
               </section>
             </div>
           </div>
@@ -1417,7 +1378,9 @@
 
       function renderChatView() {
         const conv = getCurrentConversation();
-        const space = getCurrentSpace();
+        const space = conv
+          ? SPACES.find((s) => s.id === conv.spaceId) || getCurrentSpace()
+          : getCurrentSpace();
         const msgs = conv ? conv.messages : [];
 
         return `
@@ -1444,28 +1407,41 @@
                         }
 
                         const isStreamingMsg = m.status === 'streaming';
+                        const isErrorMsg = m.status === 'error';
                         const isCopied = state.copiedKey === m.id;
-                        const mood = isStreamingMsg ? 'speaking' : 'calm';
+                        const mood = isErrorMsg
+                          ? 'error'
+                          : isStreamingMsg
+                          ? m.content
+                            ? 'speaking'
+                            : 'thinking'
+                          : 'calm';
 
                         return `
                           <div class="flex items-start gap-3 kairo-appear">
                             <div class="mt-1">${renderKairoAvatar('compact', mood)}</div>
                             <div class="min-w-0 flex-1">
-                              <div class="rounded-2xl border border-slate-200/80 bg-white/90 px-4 py-3.5 dark:border-indigo-400/15 dark:bg-[#0b1128]/90 ${
-                                isStreamingMsg ? 'kairo-streaming' : ''
-                              }">
+                              <div class="rounded-2xl border px-4 py-3.5 ${
+                                isErrorMsg
+                                  ? 'border-rose-500/40 bg-rose-500/10'
+                                  : 'border-slate-200/80 bg-white/90 dark:border-indigo-400/15 dark:bg-[#0b1128]/90'
+                              } ${isStreamingMsg && m.content ? 'kairo-streaming' : ''}">
                                 <div data-stream-body="${escapeHtml(m.id)}">
                                   ${
                                     m.content
                                       ? renderMarkdown(m.content)
                                       : isStreamingMsg
-                                      ? '<span class="text-xs text-slate-400">…</span>'
+                                      ? `<div class="flex items-center gap-1.5 py-1 text-slate-400" aria-label="応答を生成中">
+                                          <span class="h-1.5 w-1.5 rounded-full bg-sky-400 kairo-dot-1"></span>
+                                          <span class="h-1.5 w-1.5 rounded-full bg-indigo-400 kairo-dot-2"></span>
+                                          <span class="h-1.5 w-1.5 rounded-full bg-violet-400 kairo-dot-3"></span>
+                                        </div>`
                                       : ''
                                   }
                                 </div>
                                 ${
-                                  m.status === 'error' && m.errorText
-                                    ? `<p class="mt-2 text-xs text-rose-500 dark:text-rose-400">${escapeHtml(
+                                  isErrorMsg && m.errorText
+                                    ? `<p class="text-xs leading-relaxed text-rose-600 dark:text-rose-300">${escapeHtml(
                                         m.errorText
                                       )}</p>`
                                     : ''
@@ -1491,7 +1467,7 @@
             </div>
           </div>
 
-          <div class="border-t border-slate-200/80 bg-slate-100/90 px-4 py-3 backdrop-blur-md dark:border-indigo-400/15 dark:bg-[#060916]/90">
+          <div class="border-t border-slate-200/80 bg-slate-100/90 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-md dark:border-indigo-400/15 dark:bg-[#060916]/90">
             <form id="chat-composer" class="mx-auto flex max-w-2xl items-end gap-2 rounded-2xl border border-indigo-400/20 bg-white p-2 shadow-xs focus-within:border-sky-400/60 dark:bg-[#0b1128]">
               <textarea
                 id="chat-input"
@@ -1501,7 +1477,7 @@
               >${escapeHtml(state.draft)}</textarea>
 
               ${
-                state.isStreaming
+                state.isBusy
                   ? `<button
                       type="button"
                       id="stop-btn"
@@ -1529,12 +1505,13 @@
               <div>
                 <h1 class="text-base font-semibold">Spaces</h1>
                 <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                  会話の空気や視点に合わせてKAIROのモードを切り替えます。
+                  会話の空気や目的に合わせてKAIROのモードを切り替えます。
                 </p>
               </div>
               <div class="space-y-3">
                 ${SPACES.map((sp) => {
                   const isActive = sp.id === state.activeSpaceId;
+                  const count = state.conversations.filter((c) => c.spaceId === sp.id).length;
                   return `
                     <div class="rounded-2xl border p-4 transition ${
                       isActive
@@ -1542,9 +1519,12 @@
                         : 'border-slate-200/80 bg-white/85 dark:border-indigo-400/15 dark:bg-[#0b1128]/85'
                     }">
                       <div class="flex items-center justify-between gap-3">
-                        <div>
-                          <div class="text-sm font-semibold">${escapeHtml(sp.name)}</div>
-                          <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">${escapeHtml(
+                        <div class="min-w-0 flex-1">
+                          <div class="flex items-center gap-2">
+                            <span class="text-sm font-semibold">${escapeHtml(sp.name)}</span>
+                            <span class="rounded-full bg-indigo-500/10 px-2 py-0.5 text-[10px] text-slate-500 dark:text-slate-400">${count}件の会話</span>
+                          </div>
+                          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">${escapeHtml(
                             sp.description
                           )}</p>
                         </div>
@@ -1557,7 +1537,7 @@
                               : 'bg-gradient-to-r from-blue-600 to-violet-600 text-white hover:brightness-110'
                           }"
                         >
-                          ${isActive ? '選択中' : '使う'}
+                          ${isActive ? '選択中・開く' : 'このSpaceで話す'}
                         </button>
                       </div>
                     </div>
@@ -1577,7 +1557,7 @@
               <div>
                 <h1 class="text-base font-semibold">Daily</h1>
                 <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                  気分やひとことメモを記録できます。
+                  その日の気分や短い振り返りを残せます。
                 </p>
               </div>
 
@@ -1782,12 +1762,136 @@
         `;
       }
 
+      function renderSettingsView() {
+        return `
+          <div class="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
+            <div class="mx-auto max-w-2xl space-y-6 kairo-appear">
+              <div>
+                <h1 class="text-base font-semibold">設定・バックアップ</h1>
+                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  表示テーマの切り替えや、会話・Memory・Dailyデータのバックアップ管理を行えます。
+                </p>
+              </div>
+
+              <!-- 接続先ステータス（APIキー不要） -->
+              <section class="rounded-2xl border border-slate-200/80 bg-white/90 p-4 dark:border-indigo-400/15 dark:bg-[#0b1128]/85">
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-semibold">接続ステータス</span>
+                  <span class="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-300">
+                    <span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+                    サーバー連携済み（キー入力不要）
+                  </span>
+                </div>
+                <p class="mt-2 break-all font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                  ${escapeHtml(WORKER_ENDPOINT)}
+                </p>
+              </section>
+
+              <!-- テーマ -->
+              <section class="flex items-center justify-between rounded-2xl border border-slate-200/80 bg-white/90 p-4 dark:border-indigo-400/15 dark:bg-[#0b1128]/85">
+                <div>
+                  <div class="text-xs font-semibold">カラーテーマ</div>
+                  <div class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                    現在: ${state.theme === 'dark' ? 'ダークモード' : 'ライトモード'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  id="settings-theme-btn"
+                  class="min-h-[38px] rounded-xl border border-slate-200 px-3.5 py-1.5 text-xs font-medium hover:bg-slate-100 dark:border-indigo-400/20 dark:hover:bg-indigo-950/60"
+                >
+                  ${state.theme === 'dark' ? 'ライトへ切替' : 'ダークへ切替'}
+                </button>
+              </section>
+
+              <!-- スナップショット保存・復元 -->
+              <section class="space-y-3 rounded-2xl border border-slate-200/80 bg-white/90 p-4 dark:border-indigo-400/15 dark:bg-[#0b1128]/85">
+                <div class="flex items-center justify-between gap-2">
+                  <div>
+                    <div class="text-xs font-semibold">スナップショット</div>
+                    <div class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                      ブラウザ内に最大10件まで状態を保存・復元できます。
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    id="create-snapshot-btn"
+                    class="min-h-[38px] shrink-0 rounded-xl bg-gradient-to-r from-blue-600 to-violet-600 px-3.5 py-1.5 text-xs font-medium text-white hover:brightness-110"
+                  >
+                    今すぐ保存
+                  </button>
+                </div>
+
+                ${
+                  state.snapshots.length === 0
+                    ? `<p class="text-xs text-slate-500 dark:text-slate-400">保存されたスナップショットはありません。</p>`
+                    : `<div class="space-y-2">
+                        ${state.snapshots
+                          .map(
+                            (snap) => `
+                              <div class="flex items-center justify-between gap-2 rounded-xl border border-slate-200/70 px-3 py-2 text-xs dark:border-indigo-400/15">
+                                <span class="truncate">${escapeHtml(snap.label)}</span>
+                                <button
+                                  type="button"
+                                  data-restore-snap="${escapeHtml(snap.id)}"
+                                  class="min-h-[32px] shrink-0 rounded-lg border border-sky-400/40 px-2.5 py-1 text-[11px] text-sky-600 hover:bg-sky-500/10 dark:text-sky-300"
+                                >
+                                  復元
+                                </button>
+                              </div>
+                            `
+                          )
+                          .join('')}
+                      </div>`
+                }
+              </section>
+
+              <!-- JSON エクスポート / インポート -->
+              <section class="space-y-3 rounded-2xl border border-slate-200/80 bg-white/90 p-4 dark:border-indigo-400/15 dark:bg-[#0b1128]/85">
+                <div class="flex items-center justify-between gap-2">
+                  <div>
+                    <div class="text-xs font-semibold">JSONバックアップ</div>
+                    <div class="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                      ファイル書き出し、またはバックアップJSONの貼り付け復元
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    id="export-json-btn"
+                    class="min-h-[38px] shrink-0 rounded-xl border border-slate-200 px-3.5 py-1.5 text-xs font-medium hover:bg-slate-100 dark:border-indigo-400/20 dark:hover:bg-indigo-950/60"
+                  >
+                    JSON書き出し
+                  </button>
+                </div>
+
+                <textarea
+                  id="import-json-area"
+                  rows="3"
+                  placeholder="復元するJSONデータを貼り付け"
+                  class="w-full rounded-xl border border-slate-200 bg-slate-50 p-2.5 font-mono text-xs focus:border-sky-400 focus:outline-none dark:border-indigo-400/20 dark:bg-[#060916]"
+                >${escapeHtml(state.importJsonDraft)}</textarea>
+
+                <button
+                  type="button"
+                  id="import-json-btn"
+                  class="min-h-[38px] rounded-xl bg-indigo-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-indigo-500"
+                >
+                  JSONから復元
+                </button>
+              </section>
+            </div>
+          </div>
+        `;
+      }
+
       function render() {
         const root = document.getElementById('app');
         if (!root) return;
 
         const conv = getCurrentConversation();
-        const space = getCurrentSpace();
+        const space = conv
+          ? SPACES.find((s) => s.id === conv.spaceId) || getCurrentSpace()
+          : getCurrentSpace();
 
         const headerTitle =
           state.view === 'home'
@@ -1800,14 +1904,17 @@
             ? 'Spaces'
             : state.view === 'daily'
             ? 'Daily'
-            : 'Memory';
+            : state.view === 'memory'
+            ? 'Memory'
+            : '設定・バックアップ';
 
         let mainContent = '';
         if (state.view === 'home') mainContent = renderHomeView();
         else if (state.view === 'chat') mainContent = renderChatView();
         else if (state.view === 'spaces') mainContent = renderSpacesView();
         else if (state.view === 'daily') mainContent = renderDailyView();
-        else mainContent = renderMemoryView();
+        else if (state.view === 'memory') mainContent = renderMemoryView();
+        else mainContent = renderSettingsView();
 
         root.innerHTML = `
           ${
@@ -1834,6 +1941,13 @@
                   </svg>
                 </button>
                 <span class="truncate text-sm font-medium">${escapeHtml(headerTitle)}</span>
+                ${
+                  state.view === 'chat'
+                    ? `<button type="button" data-go-view="spaces" class="hidden shrink-0 rounded-full border border-indigo-400/25 bg-indigo-500/10 px-2.5 py-0.5 text-[10px] font-medium text-sky-700 dark:text-sky-300 sm:inline-block">
+                        ${escapeHtml(space.shortLabel)}
+                      </button>`
+                    : ''
+                }
               </div>
 
               <div class="flex items-center gap-1.5">
@@ -1866,6 +1980,17 @@
                 ? `<div role="alert" class="relative z-10 flex items-center justify-between gap-2 border-b border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-xs text-rose-600 dark:text-rose-300">
                     <span class="min-w-0 flex-1">${escapeHtml(state.errorMessage)}</span>
                     <button type="button" id="close-error-btn" class="min-h-[32px] shrink-0 rounded-lg px-2 py-1 text-[11px] font-medium hover:bg-rose-500/15">
+                      閉じる
+                    </button>
+                  </div>`
+                : ''
+            }
+
+            ${
+              state.noticeMessage
+                ? `<div role="status" class="relative z-10 flex items-center justify-between gap-2 border-b border-sky-500/30 bg-sky-500/10 px-4 py-2 text-xs text-sky-700 dark:text-sky-300">
+                    <span class="min-w-0 flex-1">${escapeHtml(state.noticeMessage)}</span>
+                    <button type="button" id="close-notice-btn" class="min-h-[32px] shrink-0 rounded-lg px-2 py-1 text-[11px] font-medium hover:bg-sky-500/15">
                       閉じる
                     </button>
                   </div>`
@@ -1915,10 +2040,10 @@
         }
 
         const drawerBrand = document.getElementById('drawer-home-brand');
-        if (drawerBrand) drawerBrand.addEventListener('click', goHome);
+        if (drawerBrand) drawerBrand.addEventListener('click', () => navigateTo('home'));
 
         const headerHomeBtn = document.getElementById('header-home-btn');
-        if (headerHomeBtn) headerHomeBtn.addEventListener('click', goHome);
+        if (headerHomeBtn) headerHomeBtn.addEventListener('click', () => navigateTo('home'));
 
         const homeNewChatBtn = document.getElementById('home-new-chat-btn');
         if (homeNewChatBtn) homeNewChatBtn.addEventListener('click', () => startNewChat(true));
@@ -1932,13 +2057,17 @@
         document.querySelectorAll('[data-go-view]').forEach((btn) => {
           btn.addEventListener('click', () => {
             const targetView = btn.getAttribute('data-go-view');
-            if (targetView) {
-              state.view = targetView;
-              state.drawerOpen = false;
-              render();
-            }
+            if (targetView) navigateTo(targetView);
           });
         });
+
+        const spaceFilter = document.getElementById('drawer-space-filter');
+        if (spaceFilter) {
+          spaceFilter.addEventListener('change', (e) => {
+            state.spaceFilterId = e.target.value;
+            render();
+          });
+        }
 
         document.querySelectorAll('[data-open-conv]').forEach((btn) => {
           btn.addEventListener('click', () => {
@@ -1967,26 +2096,8 @@
         const headerThemeBtn = document.getElementById('header-theme-btn');
         if (headerThemeBtn) headerThemeBtn.addEventListener('click', toggleThemeAction);
 
-        const savePreviewKeyBtn = document.getElementById('save-preview-key-btn');
-        if (savePreviewKeyBtn) {
-          savePreviewKeyBtn.addEventListener('click', () => {
-            const keyInput = document.getElementById('preview-api-key');
-            state.apiKey = keyInput ? keyInput.value.trim() : '';
-            savePreviewApiKey(state.apiKey);
-            saveModel(state.model || DEFAULT_MODEL);
-            state.errorMessage = null;
-            render();
-          });
-        }
-
-        const clearPreviewKeyBtn = document.getElementById('clear-preview-key-btn');
-        if (clearPreviewKeyBtn) {
-          clearPreviewKeyBtn.addEventListener('click', () => {
-            state.apiKey = '';
-            savePreviewApiKey('');
-            render();
-          });
-        }
+        const settingsThemeBtn = document.getElementById('settings-theme-btn');
+        if (settingsThemeBtn) settingsThemeBtn.addEventListener('click', toggleThemeAction);
 
         const chatComposer = document.getElementById('chat-composer');
         if (chatComposer) {
@@ -2011,7 +2122,7 @@
         }
 
         const stopBtn = document.getElementById('stop-btn');
-        if (stopBtn) stopBtn.addEventListener('click', stopStreaming);
+        if (stopBtn) stopBtn.addEventListener('click', stopActiveRequest);
 
         document.querySelectorAll('[data-copy-msg]').forEach((btn) => {
           btn.addEventListener('click', () => {
@@ -2036,8 +2147,7 @@
             if (id && SPACES.some((s) => s.id === id)) {
               state.activeSpaceId = id;
               saveActiveSpace(id);
-              state.view = 'chat';
-              render();
+              startNewChat(true);
             }
           });
         });
@@ -2157,6 +2267,37 @@
           });
         });
 
+        const createSnapshotBtn = document.getElementById('create-snapshot-btn');
+        if (createSnapshotBtn) {
+          createSnapshotBtn.addEventListener('click', () => createSnapshot());
+        }
+
+        document.querySelectorAll('[data-restore-snap]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const id = btn.getAttribute('data-restore-snap');
+            if (id) restoreSnapshot(id);
+          });
+        });
+
+        const exportJsonBtn = document.getElementById('export-json-btn');
+        if (exportJsonBtn) {
+          exportJsonBtn.addEventListener('click', exportAllJson);
+        }
+
+        const importJsonArea = document.getElementById('import-json-area');
+        if (importJsonArea) {
+          importJsonArea.addEventListener('input', (e) => {
+            state.importJsonDraft = e.target.value;
+          });
+        }
+
+        const importJsonBtn = document.getElementById('import-json-btn');
+        if (importJsonBtn) {
+          importJsonBtn.addEventListener('click', () => {
+            importFromJsonText(state.importJsonDraft);
+          });
+        }
+
         const closeErrorBtn = document.getElementById('close-error-btn');
         if (closeErrorBtn) {
           closeErrorBtn.addEventListener('click', () => {
@@ -2164,10 +2305,21 @@
             render();
           });
         }
+
+        const closeNoticeBtn = document.getElementById('close-notice-btn');
+        if (closeNoticeBtn) {
+          closeNoticeBtn.addEventListener('click', () => {
+            state.noticeMessage = null;
+            render();
+          });
+        }
       }
 
       applyThemeClass(state.theme);
       render();
+      if (state.view === 'chat') {
+        scrollMessagesToBottom(true);
+      }
     })();
   </script>
 </body>
